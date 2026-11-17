@@ -1148,6 +1148,73 @@ fn finish_reveal(weak: slint::Weak<AppWindow>, first: bool, tries: u32) {
 #[cfg(not(windows))]
 static POINTER_STUCK: AtomicBool = AtomicBool::new(false);
 
+/// Окно уходило с экрана (свернули в панель задач или спрятали в трей). X11 не хранит
+/// пиксели окна, которого нет на экране, а Slint считает кадр актуальным: после возврата
+/// остаётся чёрное окно с одними кнопками заголовка. Флаг говорит «следующее появление —
+/// после отсутствия, кадр надо нарисовать заново».
+#[cfg(not(windows))]
+static REPAINT_AFTER_RETURN: AtomicBool = AtomicBool::new(false);
+/// Когда окно ушло с экрана (мс). Нужно, чтобы не перерисовать его раньше, чем оконный
+/// менеджер действительно его свернёт: иначе перерисовка вернёт окно на экран сразу
+/// после нажатия «свернуть».
+#[cfg(not(windows))]
+static AWAY_SINCE_MS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+#[cfg(not(windows))]
+static REPAINT_NOW: AtomicBool = AtomicBool::new(false);
+
+#[cfg(not(windows))]
+fn now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
+}
+
+/// Запомнить, что окно ушло с экрана.
+#[cfg(not(windows))]
+fn mark_window_away() {
+    AWAY_SINCE_MS.store(now_ms(), Ordering::SeqCst);
+    REPAINT_AFTER_RETURN.store(true, Ordering::SeqCst);
+}
+
+/// Окно вернулось: перерисовать содержимое целиком.
+///
+/// Показ через сам Slint (`hide()` + `show()`) помечает всё окно как грязное — в бэкенде
+/// это сделано ровно для X11, который не хранит пиксели немаркированного окна. Поэтому
+/// идём тем же путём, каким это делает разворот окна: он у пользователя и вылечивал
+/// картинку. Вызывается из таймера, уже вне обработчика события окна.
+///
+/// Перерисовываем только когда окно действительно вернулось: оконный менеджер успел его
+/// свернуть (600 мс) и оно больше не помечено как скрытое. Иначе перерисовка сама вернула
+/// бы окно на экран и «свернуть» перестало бы работать.
+#[cfg(not(windows))]
+fn repaint_after_return(ui: &AppWindow) {
+    if !REPAINT_AFTER_RETURN.load(Ordering::SeqCst) {
+        return;
+    }
+    if now_ms().saturating_sub(AWAY_SINCE_MS.load(Ordering::SeqCst)) < 600 {
+        return;
+    }
+    if win::hidden_by_wm() {
+        return;
+    }
+    if REPAINT_NOW.swap(true, Ordering::SeqCst) {
+        return;
+    }
+    REPAINT_AFTER_RETURN.store(false, Ordering::SeqCst);
+    let weak = ui.as_weak();
+    Timer::single_shot(Duration::ZERO, move || {
+        if let Some(ui) = weak.upgrade() {
+            let w = ui.window();
+            let _ = w.hide();
+            let _ = ui.show();
+            w.request_redraw();
+            log("окно: содержимое перерисовано после возврата".to_string());
+        }
+        REPAINT_NOW.store(false, Ordering::SeqCst);
+    });
+}
+
 /// Снять «нажатую» кнопку и захват указателя. Позиция за пределами окна: попадать в
 /// элементы нельзя, иначе это будет клик.
 #[cfg(not(windows))]
@@ -1254,6 +1321,8 @@ fn hide_checked(ui: &AppWindow, h: isize, from: &str) {
                 if vis {
                     // Последний рубеж: сворачиваем в панель задач, чтобы окно не «залипло».
                     ui.window().set_minimized(true);
+                    #[cfg(not(windows))]
+                    mark_window_away();
                     log(format!("скрытие ({from2}): свернули в панель задач"));
                 }
             });
@@ -1996,6 +2065,8 @@ pub fn run(start_hidden: bool) -> Result<(), slint::PlatformError> {
             // Окно ушло с экрана прямо на клике: если отпускание кнопки до интерфейса
             // не дошло, после возврата кнопки заголовка остаются «нажатыми» и мертвы.
             #[cfg(not(windows))]
+            mark_window_away();
+            #[cfg(not(windows))]
             clear_pointer_state(&ui);
         }
     });
@@ -2019,6 +2090,8 @@ pub fn run(start_hidden: bool) -> Result<(), slint::PlatformError> {
                         return;
                     }
                     hide_checked(&ui, h, "крестик");
+                    #[cfg(not(windows))]
+                    mark_window_away();
                     win::trim_memory();
                     // Окно исчезло между нажатием и отпусканием: без сброса состояния
                     // указателя кнопки заголовка после возврата из трея мертвы.
@@ -2051,6 +2124,8 @@ pub fn run(start_hidden: bool) -> Result<(), slint::PlatformError> {
                         win::force_foreground(h);
                     } else {
                         ui.window().set_minimized(true);
+                        #[cfg(not(windows))]
+                        mark_window_away();
                         clear_pointer_state(&ui);
                     }
                 }
@@ -2119,6 +2194,17 @@ pub fn run(start_hidden: bool) -> Result<(), slint::PlatformError> {
                 with_ctx(|c| c.go_forward());
                 EventResult::PreventDefault
             }
+            // Окно вернулось с панели задач или из трея: содержимое надо нарисовать заново.
+            // Решение принимает repaint_after_return: она же проверяет, что окно уже
+            // действительно вернулось, а не просто потеряло фокус при сворачивании.
+            WindowEvent::Focused(true) | WindowEvent::Occluded(false) => {
+                #[cfg(not(windows))]
+                with_ctx(|c| {
+                    let ui = c.ui();
+                    repaint_after_return(&ui);
+                });
+                EventResult::Propagate
+            }
             _ => EventResult::Propagate,
         }
     });
@@ -2135,6 +2221,13 @@ pub fn run(start_hidden: bool) -> Result<(), slint::PlatformError> {
         // Значок в лотке на Linux читает это состояние из своего потока.
         #[cfg(not(windows))]
         crate::tray::refresh();
+        // Окно вернулось после сворачивания: X11 не хранит его пиксели, поэтому кадр
+        // рисуем заново (проверки внутри — чтобы не вернуть окно на экран раньше времени).
+        #[cfg(not(windows))]
+        with_ctx(|c| {
+            let ui = c.ui();
+            repaint_after_return(&ui);
+        });
         with_ctx(|c| c.sync_player());
     });
     // Строки текста переключаются точнее, чем раз в 250 мс.

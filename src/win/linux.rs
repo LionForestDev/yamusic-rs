@@ -107,6 +107,38 @@ pub fn is_visible(_h: isize) -> bool {
     with_ui(|ui| ui.window().is_visible()).unwrap_or(false)
 }
 
+/// Окно свёрнуто оконным менеджером (X11: состояние _NET_WM_STATE_HIDDEN).
+///
+/// Нужно, чтобы не перерисовать окно раньше, чем оно действительно ушло с экрана:
+/// перерисовка возвращает окно обратно, и «свернуть» перестало бы работать.
+/// На Wayland состояние окна приложению недоступно — там отвечаем «нет».
+pub fn hidden_by_wm() -> bool {
+    if is_wayland() {
+        return false;
+    }
+    let Some(id) = with_ui(|ui| {
+        ui.window().with_winit_window(|w| {
+            use slint::winit_030::winit::raw_window_handle::{HasWindowHandle, RawWindowHandle};
+            match w.window_handle().map(|h| h.as_raw()) {
+                Ok(RawWindowHandle::Xlib(h)) => h.window as u64,
+                Ok(RawWindowHandle::Xcb(h)) => h.window.get() as u64,
+                _ => 0,
+            }
+        })
+    })
+    .flatten()
+    else {
+        return false;
+    };
+    if id == 0 {
+        return false;
+    }
+    match Command::new("xprop").args(["-id", &id.to_string(), "_NET_WM_STATE"]).output() {
+        Ok(o) => String::from_utf8_lossy(&o.stdout).contains("_NET_WM_STATE_HIDDEN"),
+        Err(_) => false,
+    }
+}
+
 pub fn is_iconic(_h: isize) -> bool {
     if let Some(v) = winit_minimized() {
         return v;
