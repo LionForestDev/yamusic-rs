@@ -8,6 +8,81 @@ use std::process::Command;
 use slint::winit_030::WinitWindowAccessor;
 use slint::ComponentHandle;
 
+/// Оконная подсистема, выбранная winit. `WAYLAND_DISPLAY` непустой — Wayland.
+/// Функция честно отвечает на вопрос «работает ли здесь скрытие окна»: на Wayland
+/// оно невозможно (см. `prepare_backend`).
+pub fn is_wayland() -> bool {
+    std::env::var("WAYLAND_DISPLAY").map(|v| !v.is_empty()).unwrap_or(false)
+}
+
+/// Настоящее состояние окна по данным оконной системы. `None` — оконная подсистема
+/// его не сообщает (Wayland), тогда вызывающий верит состоянию интерфейса.
+fn winit_visible() -> Option<bool> {
+    with_ui(|ui| ui.window().with_winit_window(|w| w.is_visible())).flatten().flatten()
+}
+
+fn winit_minimized() -> Option<bool> {
+    with_ui(|ui| ui.window().with_winit_window(|w| w.is_minimized())).flatten().flatten()
+}
+
+/// Существует ли сокет X-сервера для `DISPLAY` вида `:0`, `:1.0`, `host:0`.
+fn x_socket_exists(display: &str) -> bool {
+    let Some((_, rest)) = display.rsplit_once(':') else { return false };
+    let num: String = rest.chars().take_while(|c| c.is_ascii_digit()).collect();
+    if num.is_empty() {
+        return false;
+    }
+    std::path::Path::new(&format!("/tmp/.X11-unix/X{num}")).exists()
+}
+
+/// Выбрать оконную подсистему ДО создания окна (вызывается из `main`).
+///
+/// Wayland физически не умеет прятать окно в трей: в winit 0.30 `set_visible(false)`
+/// на Wayland пустой («Not possible on Wayland»), а `set_minimized(false)` игнорируется
+/// («You can't unminimize the window on Wayland»), то есть свёрнутое окно оттуда уже не
+/// вернуть — в том числе значком в трее. Поэтому на Wayland «скрыть в трей» выглядит
+/// нерабочим, сколько ни правь интерфейс.
+///
+/// Через X11 (XWayland) те же вызовы работают по-настоящему: скрытие снимает окно с
+/// экрана, показ и разворачивание возвращают его, панель задач и область без панелей
+/// доступны. Поэтому при живой сессии Wayland и доступном X-сервере окно создаём в X11.
+/// Отключить это можно переменной окружения `YAMUSIC_NO_X11=1`.
+pub fn prepare_backend() {
+    let wayland = is_wayland();
+    let display = std::env::var("DISPLAY").map(|v| v.trim().to_string()).unwrap_or_default();
+    if std::env::var_os("YAMUSIC_NO_X11").is_some() {
+        crate::config::log(if wayland {
+            "окно: Wayland по YAMUSIC_NO_X11 — прятать окно в трей здесь нельзя, только свернуть"
+                .to_string()
+        } else {
+            "окно: X11 (YAMUSIC_NO_X11)".to_string()
+        });
+        return;
+    }
+    if !wayland {
+        crate::config::log("окно: X11 — скрытие в трей и разворачивание работают".to_string());
+        return;
+    }
+    if display.is_empty() {
+        crate::config::log(
+            "окно: Wayland, X-сервера нет (DISPLAY пуст) — окно не спрятать, останется сворачивание"
+                .to_string(),
+        );
+        return;
+    }
+    if !x_socket_exists(&display) {
+        crate::config::log(format!(
+            "окно: Wayland, X-сервер {display} недоступен — окно не спрятать, останется сворачивание"
+        ));
+        return;
+    }
+    std::env::remove_var("WAYLAND_DISPLAY");
+    std::env::remove_var("WAYLAND_SOCKET");
+    crate::config::log(format!(
+        "окно: X11 через XWayland (DISPLAY={display}) — скрытие в трей и возврат работают"
+    ));
+}
+
 thread_local! {
     /// Окно приложения. Через него выполняются все оконные операции: на Linux у нас нет
     /// HWND, зато есть сам компонент Slint.
@@ -24,16 +99,26 @@ fn with_ui<R>(f: impl FnOnce(&crate::gui::AppWindow) -> R) -> Option<R> {
 }
 
 pub fn is_visible(_h: isize) -> bool {
+    // X11 сообщает настоящее состояние окна. Wayland его не сообщает (None) — там
+    // верим состоянию интерфейса, другого источника нет.
+    if let Some(v) = winit_visible() {
+        return v;
+    }
     with_ui(|ui| ui.window().is_visible()).unwrap_or(false)
 }
 
 pub fn is_iconic(_h: isize) -> bool {
+    if let Some(v) = winit_minimized() {
+        return v;
+    }
     with_ui(|ui| ui.window().is_minimized()).unwrap_or(false)
 }
 
 pub fn show(_h: isize) {
     with_ui(|ui| {
         let w = ui.window();
+        // На X11 разворачивание работает; на Wayland winit его игнорирует (тогда окно
+        // возвращает композитор — из панели задач).
         w.set_minimized(false);
         let _ = ui.show();
         w.with_winit_window(|ww| ww.focus_window());
@@ -41,6 +126,15 @@ pub fn show(_h: isize) {
 }
 
 pub fn hide(_h: isize) {
+    if is_wayland() {
+        // Wayland не умеет прятать окно: winit игнорирует set_visible(false). Честно
+        // делаем то, что здесь возможно, — сворачиваем в панель задач.
+        with_ui(|ui| ui.window().set_minimized(true));
+        crate::config::log(
+            "скрытие: Wayland не прячет окно — свернули в панель задач".to_string(),
+        );
+        return;
+    }
     with_ui(|ui| {
         let _ = ui.window().hide();
     });

@@ -30,7 +30,7 @@ mod yandex_id;
 
 /// Отметка сборки: по ней в журнале видно, какая копия запущена.
 #[cfg(not(windows))]
-const BUILD_STAMP: &str = "linux-wayland r16";
+const BUILD_STAMP: &str = "linux r17";
 
 /// Занять мьютекс единственного экземпляра. Если он уже чей-то — отпустить свою ссылку,
 /// чтобы мьютекс исчез вместе с тем процессом.
@@ -114,6 +114,8 @@ fn main() -> Result<(), slint::PlatformError> {
     // Skia без видеокарты: память не зависит от драйвера (с OpenGL или D3D окно занимает
     // в 2–3 раза больше). Режим работы («Плавный» или «Лёгкий») меняет только анимации
     // и кэши и переключается на лету (gui::apply_mode).
+    #[cfg(not(windows))]
+    win::prepare_backend();
     slint::BackendSelector::new().backend_name("winit".into()).renderer_name("skia-software".into()).select()?;
     update::cleanup();
     win::refresh_autostart();

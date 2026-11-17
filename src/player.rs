@@ -929,11 +929,13 @@ impl Engine {
         }
         if let Some((_, b)) = self.cache.iter().find(|(id, _)| id == &t.id) {
             let b = b.clone();
+            log("переключение: из памяти — сразу".to_string());
             self.play_bytes(b);
             return;
         }
         if self.prefetch.as_ref().map(|(id, _)| *id == t.id).unwrap_or(false) {
             let (_, b) = self.prefetch.take().unwrap();
+            log("переключение: из заготовки — сразу".to_string());
             self.play_loaded(b);
             return;
         }
@@ -956,8 +958,11 @@ impl Engine {
                 return;
             }
             log(format!("«{}» нет на диске — играем из сети", t.title));
-            // Сколько накопить, чтобы начинать играть: около секунды-двух загрузки.
-            const START_BYTES: usize = 1024 * 1024;
+            let t0 = std::time::Instant::now();
+            // Сколько накопить, чтобы начинать играть. Раньше здесь был 1 МБ: при 320 кбит/с
+            // это примерно 25 секунд звука, и старт ждал их целиком. 384 КБ — около 10 секунд
+            // запаса, плеер успевает дочитать их, пока играет начало.
+            const START_BYTES: usize = 384 * 1024;
             let url = match api.stream_url(&t.id) {
                 Ok(u) => u,
                 Err(e) => {
@@ -965,6 +970,7 @@ impl Engine {
                     return;
                 }
             };
+            log(format!("переключение: адрес потока за {} мс", t0.elapsed().as_millis()));
             let (total, mut resp) = match api.open_stream(&url) {
                 Ok(v) => v,
                 Err(e) => {
@@ -982,6 +988,11 @@ impl Engine {
                     Ok(n) => {
                         shared.push(&buf[..n]);
                         if !sent && shared.len() >= limit {
+                            log(format!(
+                                "переключение: первые {} КБ за {} мс",
+                                shared.len() / 1024,
+                                t0.elapsed().as_millis()
+                            ));
                             let _ = tx.send(Msg::Stream { gen, shared: shared.clone(), total });
                             sent = true;
                         }
@@ -1019,12 +1030,16 @@ impl Engine {
         // Следующий трек качаем сразу после старта текущего, а не перед самым концом:
         // переключение вручную иначе каждый раз ждёт полной загрузки файла.
         let Some(next) = self.queue.front().cloned() else { return };
-        // Пока трек идёт потоком, не отбираем у него канал: следующий качаем после
-        // четверти прослушивания (а если текущий уже целиком в памяти — сразу).
+        // Пока трек идёт потоком, не отбираем у него канал целиком: следующий начинаем
+        // качать, прослушав несколько секунд (а если текущий уже целиком в памяти — сразу).
+        // Раньше здесь стояла четверть трека: при переключении вручную в первые минуты
+        // следующего трека в памяти ещё не было, и каждое переключение заново ждало сеть —
+        // это и было «долго переключает».
         if self.current_bytes.is_none() {
+            const PREFETCH_AFTER_SECS: f32 = 8.0;
             let early = {
                 let s = self.shared.lock().unwrap();
-                s.duration > 0.0 && s.position < s.duration * 0.25
+                s.position < PREFETCH_AFTER_SECS
             };
             if early {
                 return;
@@ -1036,6 +1051,7 @@ impl Engine {
         }
         let Some(api) = self.api.clone() else { return };
         self.prefetching = Some(next.id.clone());
+        log(format!("заготовка: качаем следующий «{}»", next.title));
         let tx = self.tx.clone();
         thread::spawn(move || {
             let res = load_track(&api, &next);

@@ -1195,10 +1195,43 @@ fn schedule_pointer_release(ui: &AppWindow) {
     });
 }
 
+/// Самопроверка скрытия окна без значка в трее: `YAMUSIC_SELFTEST=hide` прогоняет
+/// цикл «спрятать → проверить → показать → проверить» по таймеру и пишет в журнал
+/// настоящее состояние окна от оконной системы. Нужна на стенде и в консоли, где
+/// значок StatusNotifierItem недоступен и скрытие нечем запустить.
+#[cfg(not(windows))]
+fn selftest_hide(weak: slint::Weak<AppWindow>) {
+    if std::env::var("YAMUSIC_SELFTEST").map(|v| v != "hide").unwrap_or(true) {
+        return;
+    }
+    log(format!(
+        "самопроверка: Wayland={}, до скрытия видимо={}",
+        win::is_wayland(),
+        win::is_visible(0)
+    ));
+    let w1 = weak.clone();
+    Timer::single_shot(Duration::from_secs(8), move || {
+        let Some(ui) = w1.upgrade() else { return };
+        log(format!("самопроверка: прячем, видимо до={}", win::is_visible(hwnd(&ui))));
+        win::hide(hwnd(&ui));
+        let w2 = ui.as_weak();
+        Timer::single_shot(Duration::from_secs(10), move || {
+            let Some(ui) = w2.upgrade() else { return };
+            log(format!("самопроверка: спрятано, видимо={}", win::is_visible(hwnd(&ui))));
+            win::show(hwnd(&ui));
+            let w3 = ui.as_weak();
+            Timer::single_shot(Duration::from_secs(3), move || {
+                let Some(ui) = w3.upgrade() else { return };
+                log(format!("самопроверка: после показа видимо={}", win::is_visible(hwnd(&ui))));
+            });
+        });
+    });
+}
+
 /// Спрятать окно и убедиться, что оно действительно скрылось.
 ///
-/// На Wayland запрос скрытия иногда теряется (композитор уже отдал фокус, окно
-/// пересоздано после возврата из трея), и тогда «крестик» выглядит нерабочим:
+/// Хотя бы одно окно на экране бывает и после запроса скрытия: композитор уже отдал
+/// фокус, окно пересоздано после возврата из трея — и тогда «крестик» выглядит нерабочим:
 /// нажатие есть, а окно остаётся. Поэтому проверяем фактическое состояние и,
 /// если окно всё ещё видно, повторяем запрос один раз.
 fn hide_checked(ui: &AppWindow, h: isize, from: &str) {
@@ -1960,6 +1993,10 @@ pub fn run(start_hidden: bool) -> Result<(), slint::PlatformError> {
         if let Some(ui) = weak.upgrade() {
             log("свернуть: запрос");
             ui.window().set_minimized(true);
+            // Окно ушло с экрана прямо на клике: если отпускание кнопки до интерфейса
+            // не дошло, после возврата кнопки заголовка остаются «нажатыми» и мертвы.
+            #[cfg(not(windows))]
+            clear_pointer_state(&ui);
         }
     });
     // Как у оригинала на Windows: пока играет трек, окно прячется в трей, иначе приложение закрывается.
@@ -2128,6 +2165,8 @@ pub fn run(start_hidden: bool) -> Result<(), slint::PlatformError> {
     if !start_hidden || !win::hide_to_tray() {
         reveal(&ui);
     }
+    #[cfg(not(windows))]
+    selftest_hide(ui.as_weak());
     slint::run_event_loop_until_quit()?;
     crate::tray::remove();
     // Фоновые потоки (аудио, сеть, обложки) не ждём: иначе процесс может остаться
