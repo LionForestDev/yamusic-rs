@@ -1198,21 +1198,107 @@ fn repaint_after_return(ui: &AppWindow) {
     if win::hidden_by_wm() {
         return;
     }
+    // Окно сейчас не на экране: спрятали в трей или свернули. Перерисовывать нечего, а в
+    // режиме hide/show это ещё и вернуло бы окно на экран (крестик перестал бы скрывать).
+    // Флаг не снимаем — перерисуем, когда окно действительно вернётся.
+    if !win::is_visible(0) {
+        return;
+    }
     if REPAINT_NOW.swap(true, Ordering::SeqCst) {
         return;
     }
     REPAINT_AFTER_RETURN.store(false, Ordering::SeqCst);
+    // Чем перерисовывать: по умолчанию — повторное объявление размера (окно не трогаем,
+    // оконный менеджер не задействован). Второй способ (hide/show) оставлен для проверки
+    // переменной YAMUSIC_REPAINT=hide: он перерисовывает гарантированно, но на KDE может
+    // оставить окно свёрнутым, потому что снимает его с экрана и возвращает сам.
+    let mode = std::env::var("YAMUSIC_REPAINT").unwrap_or_else(|_| default_repaint_mode());
     let weak = ui.as_weak();
     Timer::single_shot(Duration::ZERO, move || {
-        if let Some(ui) = weak.upgrade() {
-            let w = ui.window();
-            let _ = w.hide();
-            let _ = ui.show();
-            w.request_redraw();
-            log("окно: содержимое перерисовано после возврата".to_string());
+        let Some(ui) = weak.upgrade() else {
+            REPAINT_NOW.store(false, Ordering::SeqCst);
+            return;
+        };
+        let w = ui.window();
+        match mode.as_str() {
+            // Снять окно с экрана и вернуть: интерфейс помечает всё окно как грязное.
+            // Перерисовывает гарантированно, но само окно уходит и возвращается.
+            "hide" => {
+                let _ = w.hide();
+                let _ = ui.show();
+                w.request_redraw();
+                log("окно: перерисовка способом hide/show".to_string());
+            }
+            // Слегка изменить размер окна и вернуть обратно: настоящая смена размера
+            // заставляет заново выделить буфер кадра и нарисовать всё.
+            "resize1" => {
+                // Развёрнутое окно размером не подвинуть — оконный менеджер держит его в
+                // максимуме. Тогда повторяем то, что делает сам пользователь: снять
+                // максимум и вернуть его. Для обычного окна размера достаточно.
+                if w.is_maximized() {
+                    w.set_maximized(false);
+                    let weak2 = ui.as_weak();
+                    Timer::single_shot(Duration::from_millis(220), move || {
+                        if let Some(ui) = weak2.upgrade() {
+                            let w = ui.window();
+                            w.set_maximized(true);
+                            w.request_redraw();
+                        }
+                    });
+                    log("окно: перерисовка снятием и возвратом максимума".to_string());
+                } else {
+                    let k = w.scale_factor();
+                    let cur = w.size();
+                    // Меняем высоту на один пиксель: по ширине в компактном режиме можно
+                    // упереться в минимальную ширину, и размер не изменится.
+                    let small = slint::LogicalSize::new(
+                        cur.width as f32 / k,
+                        (cur.height as f32 - k).max(k) / k,
+                    );
+                    w.set_size(small);
+                    let weak2 = ui.as_weak();
+                    let back = cur.to_logical(k);
+                    Timer::single_shot(Duration::from_millis(140), move || {
+                        if let Some(ui) = weak2.upgrade() {
+                            ui.window().set_size(back);
+                            ui.window().request_redraw();
+                        }
+                    });
+                    log("окно: перерисовка способом resize1".to_string());
+                }
+            }
+            // Изменить масштаб разметки на неуловимую величину и вернуть: пересчёт
+            // раскладки помечает грязными все элементы. Окно не трогаем вообще.
+            "scale" => {
+                let app = ui.global::<App>();
+                let k = app.get_ui_scale();
+                app.set_ui_scale(k * 1.0005);
+                let weak2 = ui.as_weak();
+                Timer::single_shot(Duration::from_millis(60), move || {
+                    if let Some(ui) = weak2.upgrade() {
+                        let app = ui.global::<App>();
+                        app.set_ui_scale(k);
+                        ui.window().request_redraw();
+                    }
+                });
+                log("окно: перерисовка способом scale".to_string());
+            }
+            // Только просьба о перерисовке и повторное объявление размера.
+            _ => {
+                let size = w.size().to_logical(w.scale_factor());
+                w.dispatch_event(slint::platform::WindowEvent::Resized { size });
+                w.request_redraw();
+                log("окно: перерисовка способом размер".to_string());
+            }
         }
         REPAINT_NOW.store(false, Ordering::SeqCst);
     });
+}
+
+/// Способ перерисовки после возврата окна; можно переопределить переменной YAMUSIC_REPAINT.
+#[cfg(not(windows))]
+fn default_repaint_mode() -> String {
+    "resize1".to_string()
 }
 
 /// Снять «нажатую» кнопку и захват указателя. Позиция за пределами окна: попадать в
