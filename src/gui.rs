@@ -1104,6 +1104,9 @@ fn reveal(ui: &AppWindow) {
         log(format!("окно не показалось: {e}"));
         return;
     }
+    // Окно вернулось из трея: если на нём осталось зажатое нажатие (его спрятали прямо
+    // на клике), кнопки заголовка не нажимались бы.
+    clear_pointer_state(ui);
     finish_reveal(ui.as_weak(), first, 0);
 }
 
@@ -1186,6 +1189,22 @@ fn schedule_pointer_release(ui: &AppWindow) {
     Timer::single_shot(Duration::ZERO, move || {
         if let Some(ui) = weak.upgrade() {
             dispatch_pointer_release(&ui.window());
+        }
+    });
+}
+
+/// Окно спрятали (в трей или в панель задач) прямо на клике — отпускание кнопки Slint
+/// уже не получит, и он остаётся с зажатым указателем на кнопке заголовка. После возврата
+/// окна нажатия в неё не проходят. Поэтому состояние указателя снимаем с задержкой в один
+/// цикл: изнутри обработчика это бесполезно (Slint ещё держит своё состояние).
+#[cfg(not(windows))]
+fn clear_pointer_state(ui: &AppWindow) {
+    POINTER_STUCK.store(true, Ordering::SeqCst);
+    let weak = ui.as_weak();
+    Timer::single_shot(Duration::ZERO, move || {
+        if let Some(ui) = weak.upgrade() {
+            dispatch_pointer_release(&ui.window());
+            log("ввод: состояние указателя сброшено после скрытия/показа окна");
         }
     });
 }
@@ -1917,10 +1936,14 @@ pub fn run(start_hidden: bool) -> Result<(), slint::PlatformError> {
                     if h != 0 {
                         win::hide(h);
                         win::trim_memory();
+                        // Окно исчезло между нажатием и отпусканием: без сброса состояния
+                        // указателя кнопки заголовка после возврата из трея мертвы.
+                        clear_pointer_state(&ui);
                         return;
                     }
                 } else {
                     ui.window().set_minimized(true);
+                    clear_pointer_state(&ui);
                     return;
                 }
             }
@@ -1944,6 +1967,7 @@ pub fn run(start_hidden: bool) -> Result<(), slint::PlatformError> {
                         win::force_foreground(h);
                     } else {
                         ui.window().set_minimized(true);
+                        clear_pointer_state(&ui);
                     }
                 }
                 Event::Show => reveal(&ui),
