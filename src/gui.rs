@@ -1161,6 +1161,15 @@ static REPAINT_AFTER_RETURN: AtomicBool = AtomicBool::new(false);
 static AWAY_SINCE_MS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 #[cfg(not(windows))]
 static REPAINT_NOW: AtomicBool = AtomicBool::new(false);
+/// Когда пользователь нажал «свернуть» (мс). Между нажатием и фактическим уходом окна
+/// с экрана оконный менеджер успевает не сразу, и в эту щель перерисовка возвращала окно
+/// обратно: окно мигало («пропадает и снова показывается») и переставало сворачиваться.
+/// Своё время нажатия надёжнее опроса оконной системы — оно есть всегда и сразу.
+#[cfg(not(windows))]
+static MINIMIZE_AT_MS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+/// Сколько ждать после нажатия «свернуть» прежде чем вообще думать о перерисовке.
+#[cfg(not(windows))]
+const MINIMIZE_SETTLE_MS: u64 = 1500;
 
 #[cfg(not(windows))]
 fn now_ms() -> u64 {
@@ -1195,7 +1204,18 @@ fn repaint_after_return(ui: &AppWindow) {
     if now_ms().saturating_sub(AWAY_SINCE_MS.load(Ordering::SeqCst)) < 600 {
         return;
     }
+    // Только что нажали «свернуть»: окно ещё может быть на экране, но уходит. Любая правка
+    // размера в этот момент возвращает его обратно — отсюда мигание и несрабатывающее
+    // сворачивание. Своё время нажатия известно всегда, в отличие от состояния окна.
+    let min_at = MINIMIZE_AT_MS.load(Ordering::SeqCst);
+    if min_at != 0 && now_ms().saturating_sub(min_at) < MINIMIZE_SETTLE_MS {
+        return;
+    }
     if win::hidden_by_wm() {
+        return;
+    }
+    // Окно свёрнуто по данным оконной системы: трогать его нельзя ничем.
+    if win::is_iconic(0) {
         return;
     }
     // Окно сейчас не на экране: спрятали в трей или свернули. Перерисовывать нечего, а в
@@ -1208,10 +1228,11 @@ fn repaint_after_return(ui: &AppWindow) {
         return;
     }
     REPAINT_AFTER_RETURN.store(false, Ordering::SeqCst);
-    // Чем перерисовывать: по умолчанию — повторное объявление размера (окно не трогаем,
-    // оконный менеджер не задействован). Второй способ (hide/show) оставлен для проверки
-    // переменной YAMUSIC_REPAINT=hide: он перерисовывает гарантированно, но на KDE может
-    // оставить окно свёрнутым, потому что снимает его с экрана и возвращает сам.
+    // Чем перерисовывать: по умолчанию — изменить масштаб разметки на неуловимую величину и
+    // вернуть. Разметка пересчитывается целиком, всё помечается грязным, а окно при этом не
+    // трогается вообще — значит перерисовка физически не может вернуть свёрнутое окно на
+    // экран. Остальные способы оставлены для проверки переменной YAMUSIC_REPAINT:
+    // resize1 (правка размера), hide (снять и вернуть), размер (повторное объявление размера).
     let mode = std::env::var("YAMUSIC_REPAINT").unwrap_or_else(|_| default_repaint_mode());
     let weak = ui.as_weak();
     Timer::single_shot(Duration::ZERO, move || {
@@ -1219,11 +1240,43 @@ fn repaint_after_return(ui: &AppWindow) {
             REPAINT_NOW.store(false, Ordering::SeqCst);
             return;
         };
+        // Проверяем ещё раз, уже перед самой правкой: между постановкой задачи и её
+        // выполнением пользователь мог нажать «свернуть», а тогда окно трогать нельзя.
+        let min_at = MINIMIZE_AT_MS.load(Ordering::SeqCst);
+        if min_at != 0 && now_ms().saturating_sub(min_at) < MINIMIZE_SETTLE_MS {
+            REPAINT_AFTER_RETURN.store(true, Ordering::SeqCst);
+            REPAINT_NOW.store(false, Ordering::SeqCst);
+            log("окно: перерисовка отложена — окно только что свернули".to_string());
+            return;
+        }
+        if win::is_iconic(0) || win::hidden_by_wm() {
+            REPAINT_AFTER_RETURN.store(true, Ordering::SeqCst);
+            REPAINT_NOW.store(false, Ordering::SeqCst);
+            return;
+        }
         let w = ui.window();
+        // Прошлый возврат размера отменили из-за сворачивания — окно осталось уменьшенным
+        // на пиксель. Возвращаем, раз оно снова на экране.
+        if let Ok(mut p) = PENDING_SIZE.lock() {
+            if let Some(sz) = p.take() {
+                w.set_size(sz);
+                log("окно: отложенный размер возвращён".to_string());
+            }
+        }
+        if PENDING_MAXIMIZE.swap(false, Ordering::SeqCst) {
+            w.set_maximized(true);
+            log("окно: отложенный максимум возвращён".to_string());
+        }
         match mode.as_str() {
             // Снять окно с экрана и вернуть: интерфейс помечает всё окно как грязное.
             // Перерисовывает гарантированно, но само окно уходит и возвращается.
             "hide" => {
+                if !window_touchable() {
+                    log("окно: перерисовка hide/show отменена — окно свернули".to_string());
+                    REPAINT_AFTER_RETURN.store(true, Ordering::SeqCst);
+                    REPAINT_NOW.store(false, Ordering::SeqCst);
+                    return;
+                }
                 let _ = w.hide();
                 let _ = ui.show();
                 w.request_redraw();
@@ -1240,6 +1293,13 @@ fn repaint_after_return(ui: &AppWindow) {
                     let weak2 = ui.as_weak();
                     Timer::single_shot(Duration::from_millis(220), move || {
                         if let Some(ui) = weak2.upgrade() {
+                            // За 220 мс окно могли свернуть: возвращать максимум свёрнутому
+                            // окну нельзя — оконный менеджер покажет его обратно.
+                            if !window_touchable() {
+                                log("окно: возврат максимума отменён — окно свернули".to_string());
+                                PENDING_MAXIMIZE.store(true, Ordering::SeqCst);
+                                return;
+                            }
                             let w = ui.window();
                             w.set_maximized(true);
                             w.request_redraw();
@@ -1260,6 +1320,15 @@ fn repaint_after_return(ui: &AppWindow) {
                     let back = cur.to_logical(k);
                     Timer::single_shot(Duration::from_millis(140), move || {
                         if let Some(ui) = weak2.upgrade() {
+                            // Окно свернули в эти 140 мс — размер ему возвращать не надо,
+                            // иначе оно всплывает обратно на экран.
+                            if !window_touchable() {
+                                log("окно: возврат размера отменён — окно свернули".to_string());
+                                if let Ok(mut p) = PENDING_SIZE.lock() {
+                                    *p = Some(back);
+                                }
+                                return;
+                            }
                             ui.window().set_size(back);
                             ui.window().request_redraw();
                         }
@@ -1268,7 +1337,10 @@ fn repaint_after_return(ui: &AppWindow) {
                 }
             }
             // Изменить масштаб разметки на неуловимую величину и вернуть: пересчёт
-            // раскладки помечает грязными все элементы. Окно не трогаем вообще.
+            // раскладки помечает грязными все элементы. Окно не трогаем вообще, но кадр
+            // при этом не перерисовывается целиком (проверено: после возврата окна
+            // остаётся 176 цветов вместо 440 — часть содержимого не рисуется).
+            // Оставлено для проверки переменной YAMUSIC_REPAINT=scale.
             "scale" => {
                 let app = ui.global::<App>();
                 let k = app.get_ui_scale();
@@ -1293,6 +1365,25 @@ fn repaint_after_return(ui: &AppWindow) {
         }
         REPAINT_NOW.store(false, Ordering::SeqCst);
     });
+}
+
+/// Размер, который не удалось вернуть из-за сворачивания: вернём, когда окно снова
+/// окажется на экране (иначе окно остаётся уменьшенным на пиксель).
+#[cfg(not(windows))]
+static PENDING_SIZE: std::sync::Mutex<Option<slint::LogicalSize>> = std::sync::Mutex::new(None);
+/// То же для развёрнутого окна: максимум, который не успели вернуть.
+#[cfg(not(windows))]
+static PENDING_MAXIMIZE: AtomicBool = AtomicBool::new(false);
+
+/// Можно ли сейчас трогать окно: оно на экране, не свёрнуто и «свернуть» не нажимали
+/// только что. Проверяется перед каждым действием, меняющим размер окна.
+#[cfg(not(windows))]
+fn window_touchable() -> bool {
+    let min_at = MINIMIZE_AT_MS.load(Ordering::SeqCst);
+    if min_at != 0 && now_ms().saturating_sub(min_at) < MINIMIZE_SETTLE_MS {
+        return false;
+    }
+    !win::is_iconic(0) && !win::hidden_by_wm() && win::is_visible(0)
 }
 
 /// Способ перерисовки после возврата окна; можно переопределить переменной YAMUSIC_REPAINT.
@@ -2147,6 +2238,8 @@ pub fn run(start_hidden: bool) -> Result<(), slint::PlatformError> {
     app.on_minimize(move || {
         if let Some(ui) = weak.upgrade() {
             log("свернуть: запрос");
+            #[cfg(not(windows))]
+            MINIMIZE_AT_MS.store(now_ms(), Ordering::SeqCst);
             ui.window().set_minimized(true);
             // Окно ушло с экрана прямо на клике: если отпускание кнопки до интерфейса
             // не дошло, после возврата кнопки заголовка остаются «нажатыми» и мертвы.
@@ -2209,6 +2302,8 @@ pub fn run(start_hidden: bool) -> Result<(), slint::PlatformError> {
                         win::show(h);
                         win::force_foreground(h);
                     } else {
+                        #[cfg(not(windows))]
+                        MINIMIZE_AT_MS.store(now_ms(), Ordering::SeqCst);
                         ui.window().set_minimized(true);
                         #[cfg(not(windows))]
                         mark_window_away();
