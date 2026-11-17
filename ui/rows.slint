@@ -141,16 +141,13 @@ export component TrackRow inherits Rectangle {
             clicked => { App.row-menu(root.block, root.index, self.absolute-position.x + 20px, self.absolute-position.y + 40px); }
         }
     }
-    // Скачано: галочка левее длительности, чтобы было видно без меню и тостов.
-    if item.downloaded && !hot: Path {
-        x: parent.width - 56px;
-        y: 23px;
-        width: 12px;
-        height: 9px;
-        commands: "M 0 4.5 L 4.2 8.5 L 12 0.5";
-        stroke: Theme.controls-color-primary-text-enabled;
-        stroke-width: 1.8px;
-        fill: transparent;
+    // Скачано: зелёная стрелка, как в мобильном приложении.
+    if item.downloaded: Icon {
+        x: parent.width - 66px;
+        y: 18px;
+        source: Icons.download-small;
+        size: 20px;
+        colorize: Theme.controls-color-download-enabled;
     }
     if !hot: Text {
         x: parent.width - 12px - self.width;

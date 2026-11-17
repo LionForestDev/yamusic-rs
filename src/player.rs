@@ -949,6 +949,12 @@ impl Engine {
         let tx = self.tx.clone();
         thread::spawn(move || {
             use std::io::Read as _;
+            // Скачанный трек играем с диска и сразу: сеть для него не нужна вообще.
+            if let Some((path, bytes)) = crate::local::read(&t) {
+                log(format!("играем из файла: {}", path.display()));
+                let _ = tx.send(Msg::Audio { gen, res: Ok(bytes) });
+                return;
+            }
             // Сколько накопить, чтобы начинать играть: около секунды-двух загрузки.
             const START_BYTES: usize = 1024 * 1024;
             let url = match api.stream_url(&t.id) {

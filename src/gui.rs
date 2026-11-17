@@ -1551,6 +1551,7 @@ pub fn run(start_hidden: bool) -> Result<(), slint::PlatformError> {
     app.set_download_dir(music_dir(&cfg).display().to_string().into());
     // По этому каталогу плеер ищет скачанный файл, а строки списков — галочку «скачано».
     crate::local::set_dir(music_dir(&cfg));
+    log(format!("скачанные треки ищем в: {}", music_dir(&cfg).display()));
     let ctx = Rc::new(Ctx {
         ui: ui.as_weak(),
         lite: Cell::new(lite),
