@@ -185,26 +185,60 @@ fn key(s: &str) -> String {
     out
 }
 
+/// Насколько глубоко смотрим внутрь каталога музыки. Скачанный список — это подпапка
+/// («Мне нравится», название плейлиста), поэтому одного уровня недостаточно.
+const MAX_DEPTH: usize = 3;
+
+fn is_audio(path: &Path) -> bool {
+    path.extension().and_then(|s| s.to_str()).is_some_and(|ext| EXTS.iter().any(|x| x.eq_ignore_ascii_case(ext)))
+}
+
+/// Обойти каталог и вложенные подпапки, собрать «имя без расширения → путь».
+fn walk(dir: &Path, depth: usize, map: &mut HashMap<String, PathBuf>, count: &mut usize) {
+    if depth == 0 {
+        return;
+    }
+    let Ok(rd) = std::fs::read_dir(dir) else { return };
+    for e in rd.flatten() {
+        let path = e.path();
+        let Ok(ft) = e.file_type() else { continue };
+        if ft.is_dir() {
+            // Скрытые каталоги и мусор пропускаем, но подпапки списков обходим.
+            let name = e.file_name().to_string_lossy().to_string();
+            if !name.starts_with('.') {
+                walk(&path, depth - 1, map, count);
+            }
+            continue;
+        }
+        if !is_audio(&path) {
+            continue;
+        }
+        if e.metadata().map(|m| m.len() == 0).unwrap_or(true) {
+            continue;
+        }
+        let Some(stem) = path.file_stem().and_then(|s| s.to_str()) else { continue };
+        *count += 1;
+        map.entry(key(stem)).or_insert(path);
+    }
+}
+
+/// Сколько аудиофайлов реально лежит в каталоге, включая подпапки списков.
+pub fn count_audio(dir: &Path) -> usize {
+    let mut map = HashMap::new();
+    let mut count = 0;
+    walk(dir, MAX_DEPTH, &mut map, &mut count);
+    count
+}
+
 /// Индекс «имя файла без расширения → путь» по всем каталогам поиска.
 fn index() -> HashMap<String, PathBuf> {
     if let Some(i) = INDEX.lock().unwrap_or_else(|e| e.into_inner()).as_ref() {
         return i.clone();
     }
     let mut map = HashMap::new();
+    let mut count = 0;
     for dir in dirs() {
-        let Ok(rd) = std::fs::read_dir(&dir) else { continue };
-        for e in rd.flatten() {
-            let path = e.path();
-            let Some(ext) = path.extension().and_then(|s| s.to_str()) else { continue };
-            if !EXTS.iter().any(|x| x.eq_ignore_ascii_case(ext)) {
-                continue;
-            }
-            if e.metadata().map(|m| m.len() == 0).unwrap_or(true) {
-                continue;
-            }
-            let Some(stem) = path.file_stem().and_then(|s| s.to_str()) else { continue };
-            map.insert(key(stem), path);
-        }
+        walk(&dir, MAX_DEPTH, &mut map, &mut count);
     }
     *INDEX.lock().unwrap_or_else(|e| e.into_inner()) = Some(map.clone());
     map
@@ -223,9 +257,17 @@ pub fn find_in(dir: &Path, t: &Track) -> Option<PathBuf> {
         .find(|p| std::fs::metadata(p).is_ok_and(|m| m.len() > 0))
 }
 
-/// Трек уже скачан в этот каталог.
+/// Трек лежит где-то внутри каталога, включая подпапки списков.
+fn find_under(dir: &Path, t: &Track) -> Option<PathBuf> {
+    let mut map = HashMap::new();
+    let mut count = 0;
+    walk(dir, MAX_DEPTH, &mut map, &mut count);
+    map.get(&key(&track_file_stem(t))).cloned()
+}
+
+/// Трек уже скачан в этот каталог или в его подпапки.
 pub fn saved_already(dir: &Path, t: &Track) -> bool {
-    find_in(dir, t).is_some()
+    find_in(dir, t).is_some() || find_under(dir, t).is_some()
 }
 
 /// Путь к скачанному треку (по всем каталогам поиска).
@@ -314,6 +356,16 @@ mod tests {
         std::fs::write(dir.join(format!("{}.part", track_file_stem(&t3))), b"x").unwrap();
         refresh();
         assert!(!is_local(&t3), "пустой файл не считается скачанным");
+        // Список качается в подпапку («Мне нравится», название плейлиста) — трек оттуда
+        // тоже должен находиться, иначе нет ни галочки, ни игры с диска.
+        let sub = dir.join("Мне нравится");
+        std::fs::create_dir_all(&sub).unwrap();
+        let t4 = track("Четвёртый", "Артист");
+        std::fs::write(sub.join(format!("{}.mp3", track_file_stem(&t4))), b"ID3sub").unwrap();
+        refresh();
+        assert!(is_local(&t4), "трек из подпапки списка не найден");
+        assert_eq!(count_audio(&dir), 2, "в подпапке списка один файл, плюс один в корне");
+        assert!(saved_already(&dir, &t4), "скачанное в подпапке не перекачивается");
         let _ = std::fs::remove_dir_all(&base);
     }
 }

@@ -1554,8 +1554,10 @@ pub fn run(start_hidden: bool) -> Result<(), slint::PlatformError> {
     // старый путь от каталога запуска. В журнале видно, что реально найдено.
     let local_dirs = crate::local::candidates(&cfg);
     for d in &local_dirs {
-        let n = std::fs::read_dir(d).map(|rd| rd.flatten().count()).unwrap_or(0);
-        log(format!("скачанные треки: {} — файлов {n}", d.display()));
+        let n = crate::local::count_audio(d);
+        if n > 0 || d == local_dirs.first().unwrap_or(d) {
+            log(format!("скачанные треки: {} — аудиофайлов {n}", d.display()));
+        }
     }
     crate::local::set_dirs(local_dirs);
     let ctx = Rc::new(Ctx {
@@ -3834,8 +3836,13 @@ fn register_extra(app: &App) {
     app.on_open_list_menu(|x, y| with_ctx(|c| c.open_list_menu(x, y)));
     app.on_row_menu(|block, i, x, y| {
         with_ctx(|c| {
-            if let Some(t) = c.row_track(&block, i.max(0) as usize) {
-                c.open_menu_for(t, x, y, true);
+            let idx = i.max(0) as usize;
+            match c.row_track(&block, idx) {
+                Some(t) => {
+                    log(format!("меню строки: {block}#{idx} — {}", t.title));
+                    c.open_menu_for(t, x, y, true);
+                }
+                None => log(format!("меню строки: {block}#{idx} — трек не найден")),
             }
         })
     });

@@ -23,7 +23,15 @@ export component TrackRow inherits Rectangle {
     background: current || hot ? Theme.controls-color-secondary-default-disabled : transparent;
     ta := TouchArea {
         mouse-cursor: MouseCursor.pointer;
-        clicked => { root.play(); }
+        clicked => {
+            // Правый край строки — это кнопка «…». Если клик всё же пришёл в строку
+            // (а не в саму кнопку), открываем меню трека, а не запускаем воспроизведение.
+            if self.mouse-x >= root.width - 46px {
+                App.row-menu(root.block, root.index, self.absolute-position.x + self.mouse-x, self.absolute-position.y + self.mouse-y + 18px);
+            } else {
+                root.play();
+            }
+        }
     }
     Cover {
         x: 0;
