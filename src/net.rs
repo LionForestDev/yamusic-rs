@@ -14,6 +14,8 @@ pub struct ListData {
     pub tracks: Vec<Track>,
     pub playlist: Option<Playlist>,
     pub album: Option<Album>,
+    /// Исполнитель для страницы «Популярные треки» целиком.
+    pub artist: Option<String>,
 }
 
 pub enum Data {
@@ -98,6 +100,7 @@ fn fetch(api: &Api, uid: &str, key: &str) -> Res<Data> {
                 tracks,
                 playlist: None,
                 album: Some(a),
+                artist: None,
             })
         }),
         "playlist" => {
@@ -110,6 +113,7 @@ fn fetch(api: &Api, uid: &str, key: &str) -> Res<Data> {
                     tracks,
                     playlist: Some(p),
                     album: None,
+                    artist: None,
                 })
             })
         }
@@ -121,6 +125,20 @@ fn fetch(api: &Api, uid: &str, key: &str) -> Res<Data> {
                 tracks,
                 playlist: None,
                 album: None,
+                artist: None,
+            })
+        }),
+        // «Популярные треки» исполнителя целиком: список открывается щелчком по заголовку
+        // блока на странице исполнителя, а не показывает первые пять, как сама страница.
+        "artist-top" => api.artist_top_tracks(arg, 500).map(|(a, tracks)| {
+            Data::List(ListData {
+                kind: ListKind::Artist,
+                title: a.name.clone(),
+                covers: a.cover.iter().cloned().collect(),
+                tracks,
+                playlist: None,
+                album: None,
+                artist: Some(a.id.clone()),
             })
         }),
         "playlists" => api.playlists(uid).map(Data::Playlists),

@@ -844,6 +844,16 @@ impl Ctx {
                     });
                 }
             }
+            // Полный список популярных треков исполнителя: шапка как у обычного списка,
+            // в подписи — сколько треков пришло.
+            ListKind::Artist => {
+                app.set_list_kind("artist".into());
+                app.set_list_kind_label(crate::i18n::tr("Исполнитель").into());
+                app.set_list_meta(crate::net::tracks_word(l.tracks.len() as u64).into());
+                if let Some(c) = l.tracks.first().and_then(|t| t.color) {
+                    app.set_list_tint(soft(c));
+                }
+            }
             _ => {
                 let p = l.playlist.as_ref();
                 let date = p.map(|p| date_ru(&p.modified)).unwrap_or_default();
@@ -932,6 +942,9 @@ impl Ctx {
     }
 
     fn list_id(l: &ListData) -> String {
+        if let Some(id) = &l.artist {
+            return id.clone();
+        }
         match (&l.playlist, &l.album) {
             (Some(p), _) => format!("{}:{}", p.uid, p.kind),
             (_, Some(a)) => a.id.clone(),
@@ -2968,6 +2981,7 @@ impl Ctx {
                 self.st.borrow_mut().artist_shown = Some(data.clone());
                 let Data::Artist(a) = &*data else { return };
                 app.set_ar_name(a.name.clone().into());
+                app.set_ar_id(a.id.clone().into());
                 app.set_ar_listeners(a.listeners.map(crate::net::listeners_word).unwrap_or_default().into());
                 app.set_ar_tint(a.color.map(|c| Color::from_argb_u8(178, c[0], c[1], c[2])).unwrap_or(Color::from_argb_u8(0, 0, 0, 0)));
                 app.set_ar_liked(self.st.borrow().liked_artists.contains(&a.id));
@@ -4411,6 +4425,16 @@ fn register_extra(app: &App) {
         })
     });
 
+    // Заголовок блока «Популярные треки» открывает список целиком, а не первые пять.
+    app.on_artist_open_popular(|| {
+        with_ctx(|c| {
+            let id = c.ui().global::<App>().get_ar_id().to_string();
+            if id.is_empty() {
+                return;
+            }
+            c.navigate(Page::List, Some(format!("artist-top:{id}")), true);
+        })
+    });
     app.on_artist_play(|| {
         with_ctx(|c| {
             let Some((id, name)) = c.current_artist() else { return };

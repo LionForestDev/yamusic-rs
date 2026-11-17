@@ -963,6 +963,70 @@ impl Api {
         })
     }
 
+    /// Полный список популярных треков исполнителя, а не только первые пять.
+    ///
+    /// Список популярного отдаётся отдельным методом `track-ids-by-rating` — он же
+    /// используется сайтом; берём страницы по 100, пока не кончатся (не больше `limit`),
+    /// затем одним пакетным запросом получаем сами треки.
+    pub fn artist_top_tracks(&self, id: &str, limit: usize) -> Res<(Artist, Vec<Track>)> {
+        let info = self.get_raw(&format!("/artists/{id}/info"))?;
+        let a = info.get("artist").and_then(parse_artist).ok_or("нет данных об исполнителе")?;
+        let mut ids: Vec<String> = Vec::new();
+        let page = 100usize;
+        let mut page_no = 0usize;
+        while page_no < 20 {
+            // Ошибку постраничного списка не считаем отказом всей страницы: ниже есть
+            // запасной путь, который умеет отдать популярные треки без постраничности.
+            let Ok(v) = self.get_raw(&format!(
+                "/artists/{id}/track-ids-by-rating?page={page_no}&pageSize={page}"
+            )) else {
+                break;
+            };
+            let part: Vec<String> = v
+                .get("trackIds")
+                .and_then(|x| x.as_array())
+                .map(|arr| arr.iter().filter_map(|x| x.as_str().map(String::from)).collect())
+                .unwrap_or_default();
+            if part.is_empty() {
+                break;
+            }
+            ids.extend(part);
+            let total = v.get("total").and_then(|x| x.as_u64()).unwrap_or(0) as usize;
+            page_no += 1;
+            if ids.len() >= total || ids.len() >= limit {
+                break;
+            }
+        }
+        if ids.is_empty() {
+            // Запасной путь: `/tracks` того же исполнителя, но постранично (page / page-size).
+            // Этим запросом страница исполнителя уже берёт свои треки, поэтому он проверен.
+            let mut out: Vec<Track> = Vec::new();
+            for page_no in 0..10usize {
+                let Ok(v) = self
+                    .get_raw(&format!("/artists/{id}/tracks?page={page_no}&page-size={page}"))
+                else {
+                    break;
+                };
+                let part: Vec<Track> = v
+                    .get("tracks")
+                    .and_then(|t| t.as_array())
+                    .map(|arr| arr.iter().filter_map(parse_track).collect())
+                    .unwrap_or_default();
+                let n = part.len();
+                out.extend(part);
+                let total = v.get("total").and_then(|x| x.as_u64()).unwrap_or(0) as usize;
+                if n < page || out.len() >= limit || (total > 0 && out.len() >= total) {
+                    break;
+                }
+            }
+            out.truncate(limit);
+            return Ok((a, out));
+        }
+        ids.truncate(limit);
+        let tracks = self.tracks(&ids)?;
+        Ok((a, tracks))
+    }
+
     pub fn artist_full(&self, id: &str) -> Res<ArtistFull> {
         let info = self.get_raw(&format!("/artists/{id}/info"))?;
         let a = info.get("artist").and_then(parse_artist).ok_or("нет данных об исполнителе")?;

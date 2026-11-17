@@ -42,6 +42,8 @@ export component ListPage inherits Rectangle {
     property <bool> album: App.list-kind == "album";
     property <bool> likes: App.list-kind == "likes";
     property <bool> playlist: App.list-kind == "playlist";
+    // Полный список популярных треков исполнителя: без закрепа и меню — это не плейлист.
+    property <bool> artist: App.list-kind == "artist";
     property <length> pad: 25px;
     property <length> text-x: pad + 204px + 28px;
     // Шапка: подпись 85, название 100, строки метаданных, кнопки.
@@ -314,8 +316,8 @@ export component ListPage inherits Rectangle {
             if playlist: HeaderButton { icon: Icons.trailer-small; text: T.t("Трейлер"); clicked => { App.list-trailer(); } }
             if album: HeaderButton { icon: App.list-liked ? Icons.liked-small : Icons.like-small; text: App.list-likes; clicked => { App.list-like(); } }
             if playlist: HeaderButton { icon: App.list-liked ? Icons.liked-small : Icons.like-small; text: App.list-likes; clicked => { App.list-like(); } }
-            HeaderButton { icon: App.pinned ? Icons.pin-filled-small : Icons.pin-small; clicked => { App.list-pin(); } }
-            HeaderButton {
+            if !artist: HeaderButton { icon: App.pinned ? Icons.pin-filled-small : Icons.pin-small; clicked => { App.list-pin(); } }
+            if !artist: HeaderButton {
                 icon: Icons.more-small;
                 clicked => { App.open-list-menu(self.absolute-position.x + self.width / 2, self.absolute-position.y + self.height); }
             }

@@ -314,6 +314,7 @@ export global App {
     // Исполнитель
     in property <bool> ar-loading: true;
     in property <string> ar-name;
+    in property <string> ar-id;
     in property <string> ar-listeners;
     in property <image> ar-cover;
     in property <color> ar-tint: #00000000;
@@ -428,6 +429,8 @@ export global App {
     callback like-result(int);
 
     callback artist-play();
+    // Открыть полный список популярных треков исполнителя (щелчок по заголовку блока).
+    callback artist-open-popular();
     callback artist-like();
     callback artist-pin();
     callback list-pin();
