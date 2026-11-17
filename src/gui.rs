@@ -1100,6 +1100,7 @@ fn quit() {
 /// Показать окно: при запуске в трей оно ещё не создано, после закрытия в трей — спрятано.
 fn reveal(ui: &AppWindow) {
     let first = hwnd(ui) == 0;
+    log(format!("показ: первое появление={first}, видимо до показа={}", ui.window().is_visible()));
     if let Err(e) = ui.show() {
         log(format!("окно не показалось: {e}"));
         return;
@@ -1137,6 +1138,7 @@ fn finish_reveal(weak: slint::Weak<AppWindow>, first: bool, tries: u32) {
     }
     win::show(h);
     win::force_foreground(h);
+    log(format!("показ: выполнено, видимо={}", ui.window().is_visible()));
 }
 
 /// Признак «композитор забрал указатель»: нажатие было, отпускание до нас не дойдёт.
@@ -1189,6 +1191,41 @@ fn schedule_pointer_release(ui: &AppWindow) {
     Timer::single_shot(Duration::ZERO, move || {
         if let Some(ui) = weak.upgrade() {
             dispatch_pointer_release(&ui.window());
+        }
+    });
+}
+
+/// Спрятать окно и убедиться, что оно действительно скрылось.
+///
+/// На Wayland запрос скрытия иногда теряется (композитор уже отдал фокус, окно
+/// пересоздано после возврата из трея), и тогда «крестик» выглядит нерабочим:
+/// нажатие есть, а окно остаётся. Поэтому проверяем фактическое состояние и,
+/// если окно всё ещё видно, повторяем запрос один раз.
+fn hide_checked(ui: &AppWindow, h: isize, from: &str) {
+    win::hide(h);
+    let weak = ui.as_weak();
+    let from = from.to_string();
+    Timer::single_shot(Duration::from_millis(250), move || {
+        let Some(ui) = weak.upgrade() else { return };
+        let hh = hwnd(&ui);
+        if win::is_visible(hh) {
+            log(format!("скрытие ({from}): окно осталось видимым — повторяем запрос"));
+            win::hide(hh);
+            let weak2 = ui.as_weak();
+            let from2 = from.clone();
+            Timer::single_shot(Duration::from_millis(250), move || {
+                let Some(ui) = weak2.upgrade() else { return };
+                let hh = hwnd(&ui);
+                let vis = win::is_visible(hh);
+                log(format!("скрытие ({from2}): видимо после повтора={vis}"));
+                if vis {
+                    // Последний рубеж: сворачиваем в панель задач, чтобы окно не «залипло».
+                    ui.window().set_minimized(true);
+                    log(format!("скрытие ({from2}): свернули в панель задач"));
+                }
+            });
+        } else {
+            log(format!("скрытие ({from}): окно скрыто"));
         }
     });
 }
@@ -1921,6 +1958,7 @@ pub fn run(start_hidden: bool) -> Result<(), slint::PlatformError> {
     let weak = ui.as_weak();
     app.on_minimize(move || {
         if let Some(ui) = weak.upgrade() {
+            log("свернуть: запрос");
             ui.window().set_minimized(true);
         }
     });
@@ -1929,18 +1967,26 @@ pub fn run(start_hidden: bool) -> Result<(), slint::PlatformError> {
     let weak = ui.as_weak();
     let p = player.clone();
     app.on_close(move || {
+        log(format!("закрытие: играет={}, трей={}", p.state().playing, win::hide_to_tray()));
         if p.state().playing {
             if let Some(ui) = weak.upgrade() {
                 if win::hide_to_tray() {
                     let h = hwnd(&ui);
-                    if h != 0 {
-                        win::hide(h);
-                        win::trim_memory();
-                        // Окно исчезло между нажатием и отпусканием: без сброса состояния
-                        // указателя кнопки заголовка после возврата из трея мертвы.
-                        clear_pointer_state(&ui);
+                    // На Linux дескриптор окна не нужен (hide работает через сам интерфейс),
+                    // поэтому прячем даже при h == 0: иначе «крестик» молча закрывал бы
+                    // приложение вместо скрытия в трей.
+                    #[cfg(windows)]
+                    if h == 0 {
+                        log("закрытие: окна нет — выходим");
+                        quit();
                         return;
                     }
+                    hide_checked(&ui, h, "крестик");
+                    win::trim_memory();
+                    // Окно исчезло между нажатием и отпусканием: без сброса состояния
+                    // указателя кнопки заголовка после возврата из трея мертвы.
+                    clear_pointer_state(&ui);
+                    return;
                 } else {
                     ui.window().set_minimized(true);
                     clear_pointer_state(&ui);
@@ -1948,6 +1994,7 @@ pub fn run(start_hidden: bool) -> Result<(), slint::PlatformError> {
                 }
             }
         }
+        log("закрытие: выходим из приложения");
         quit();
     });
 
