@@ -256,3 +256,11 @@ pub fn refresh_autostart() {
 pub fn is_window(hwnd: isize) -> bool {
     unsafe { IsWindow(h(hwnd)) != 0 }
 }
+
+/// Windows: второй запуск поднимает окно сообщением трея (`tray::wake_existing`),
+/// отдельный запрос на показ не нужен.
+pub fn request_wake() {}
+
+pub fn take_wake() -> bool {
+    false
+}

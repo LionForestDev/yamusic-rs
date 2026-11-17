@@ -74,7 +74,15 @@ impl Default for Config {
 pub fn dir() -> PathBuf {
     static DIR: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
     DIR.get_or_init(|| {
+        // Windows — %APPDATA%, Linux — XDG_CONFIG_HOME (обычно ~/.config).
+        #[cfg(windows)]
         let base = PathBuf::from(std::env::var("APPDATA").unwrap_or_else(|_| ".".into()));
+        #[cfg(not(windows))]
+        let base = std::env::var_os("XDG_CONFIG_HOME")
+            .map(PathBuf::from)
+            .filter(|p| p.is_absolute())
+            .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".config")))
+            .unwrap_or_else(|| PathBuf::from("."));
         let dir = base.join("yamusic-rs");
         if !dir.exists() {
             if let Some(old) = ["yamusic-lite", "yawave"].iter().map(|n| base.join(n)).find(|p| p.exists()) {
@@ -120,6 +128,12 @@ impl Config {
             let path = dir().join("config.json");
             let tmp = dir().join("config.json.tmp");
             if std::fs::write(&tmp, s).is_ok() {
+                // На Linux токен лежит в config.json без шифрования — файл только для владельца.
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::PermissionsExt;
+                    let _ = std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o600));
+                }
                 let _ = std::fs::rename(&tmp, &path);
             }
         }

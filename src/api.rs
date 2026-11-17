@@ -1525,6 +1525,17 @@ let mp3 = || arr.iter().filter(|x| x.get("codec").and_then(|c| c.as_str()) == So
         Ok(n)
     }
 
+    /// Открыть аудио потоком: ответ читается по частям, длина — если сервер её прислал.
+    /// Ссылки уже подписаны — токен не нужен.
+    pub fn open_stream(&self, url: &str) -> Res<(Option<u64>, reqwest::blocking::Response)> {
+        let resp = self.http.get(url).send().map_err(|e| format!("сеть: {e}"))?;
+        if !resp.status().is_success() {
+            return Err(format!("HTTP {}", resp.status()));
+        }
+        let len = resp.content_length();
+        Ok((len, resp))
+    }
+
     /// Скачать файл целиком (аудио, обложка). Ссылки уже подписаны — без токена.
     pub fn fetch_bytes(&self, url: &str) -> Res<Vec<u8>> {
         let resp = self.http.get(url).send().map_err(|e| format!("сеть: {e}"))?;

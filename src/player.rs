@@ -112,6 +112,8 @@ enum Msg {
     Likes(Res<Vec<String>>),
     Batch { res: Res<Batch>, replace: bool, gen: u64 },
     Audio { gen: u64, res: Res<Vec<u8>> },
+    /// Первые байты трека уже пришли — можно начинать играть, остальное догружается.
+    Stream { gen: u64, shared: Arc<crate::stream::Shared>, total: Option<u64> },
     Prefetch { id: String, res: Res<Vec<u8>> },
     Error(String),
 }
@@ -157,6 +159,11 @@ impl Player {
 }
 
 fn load_track(api: &Api, t: &Track) -> Res<Vec<u8>> {
+    // Скачанный трек играем с диска: не ждём сеть, не «прогружаем» заново и работает без неё.
+    if let Some((path, bytes)) = crate::local::read(t) {
+        crate::config::log(format!("играем из файла: {}", path.display()));
+        return Ok(bytes);
+    }
     let url = api.stream_url(&t.id)?;
     api.fetch_bytes(&url)
 }
@@ -222,6 +229,8 @@ struct Engine {
     shuffle: bool,
     prefetch: Option<(String, Vec<u8>)>,
     prefetching: Option<String>,
+    /// Последние проигранные треки: возврат назад и «туда-обратно» играет сразу, без сети.
+    cache: Vec<(String, Arc<[u8]>)>,
     errors_in_row: u32,
     was_playing: bool,
 }
@@ -270,6 +279,7 @@ impl Engine {
             shuffle: false,
             prefetch: None,
             prefetching: None,
+            cache: Vec::new(),
             errors_in_row: 0,
             was_playing: false,
         }
@@ -455,7 +465,14 @@ impl Engine {
     }
 
     fn replay(&mut self) -> bool {
-        let Some(bytes) = self.current_bytes.clone() else { return false };
+        let Some(bytes) = self.current_bytes.clone() else {
+            // Трек играл потоком: целиком в памяти его нет — начинаем заново.
+            if self.current.is_some() {
+                self.start_current();
+                return true;
+            }
+            return false;
+        };
         let Ok(src) = Decoder::new(Cursor::new(bytes)) else { return false };
         let src = Eq::new(src.convert_samples::<f32>(), self.eq.clone());
         if let Some(sink) = self.sink() {
@@ -518,6 +535,11 @@ impl Engine {
                         Ok(b) => self.play_loaded(b),
                         Err(e) => self.on_load_error(e),
                     }
+                }
+            }
+            Msg::Stream { gen, shared, total } => {
+                if gen == self.gen {
+                    self.play_stream(shared, total);
                 }
             }
             Msg::Prefetch { id, res } => {
@@ -905,6 +927,11 @@ impl Engine {
             s.duration = t.duration_ms as f32 / 1000.0;
             s.loading = true;
         }
+        if let Some((_, b)) = self.cache.iter().find(|(id, _)| id == &t.id) {
+            let b = b.clone();
+            self.play_bytes(b);
+            return;
+        }
         if self.prefetch.as_ref().map(|(id, _)| *id == t.id).unwrap_or(false) {
             let (_, b) = self.prefetch.take().unwrap();
             self.play_loaded(b);
@@ -921,21 +948,81 @@ impl Engine {
         let gen = self.gen;
         let tx = self.tx.clone();
         thread::spawn(move || {
+            use std::io::Read as _;
+            // Сколько накопить, чтобы начинать играть: около секунды-двух загрузки.
+            const START_BYTES: usize = 1024 * 1024;
+            let url = match api.stream_url(&t.id) {
+                Ok(u) => u,
+                Err(e) => {
+                    let _ = tx.send(Msg::Audio { gen, res: Err(e) });
+                    return;
+                }
+            };
+            let (total, mut resp) = match api.open_stream(&url) {
+                Ok(v) => v,
+                Err(e) => {
+                    let _ = tx.send(Msg::Audio { gen, res: Err(e) });
+                    return;
+                }
+            };
+            let shared = crate::stream::Shared::new();
+            let mut sent = false;
+            let limit = total.map(|n| n as usize).unwrap_or(usize::MAX).min(START_BYTES);
+            let mut buf = vec![0u8; 64 * 1024];
+            loop {
+                match resp.read(&mut buf) {
+                    Ok(0) => break,
+                    Ok(n) => {
+                        shared.push(&buf[..n]);
+                        if !sent && shared.len() >= limit {
+                            let _ = tx.send(Msg::Stream { gen, shared: shared.clone(), total });
+                            sent = true;
+                        }
+                    }
+                    Err(e) => {
+                        if sent {
+                            // Начало уже играет: обрываем поток ошибкой, плеер переключит трек.
+                            shared.fail(format!("сеть: {e}"));
+                        } else {
+                            let _ = tx.send(Msg::Audio { gen, res: Err(format!("сеть: {e}")) });
+                        }
+                        return;
+                    }
+                }
+            }
+            if !sent {
+                let _ = tx.send(Msg::Stream { gen, shared: shared.clone(), total });
+            }
+            shared.finish();
+        });
+    }
+
+    /// Докачать трек целиком (запасной путь, если потоковый декодер не открылся).
+    fn start_full_download(&mut self) {
+        let (Some(api), Some(t)) = (self.api.clone(), self.current.clone()) else { return };
+        let gen = self.gen;
+        let tx = self.tx.clone();
+        thread::spawn(move || {
             let res = load_track(&api, &t);
             let _ = tx.send(Msg::Audio { gen, res });
         });
     }
 
     fn prefetch_next(&mut self) {
-        // Следующий трек качаем под конец текущего: не держать в памяти два файла всё время.
-        let near_end = {
-            let s = self.shared.lock().unwrap();
-            s.duration > 0.0 && s.duration - s.position <= 45.0
-        };
-        if !near_end {
-            return;
-        }
+        // Следующий трек качаем сразу после старта текущего, а не перед самым концом:
+        // переключение вручную иначе каждый раз ждёт полной загрузки файла.
         let Some(next) = self.queue.front().cloned() else { return };
+        // Пока трек идёт потоком, не отбираем у него канал: следующий качаем после
+        // четверти прослушивания (а если текущий уже целиком в памяти — сразу).
+        if self.current_bytes.is_none() {
+            let early = {
+                let s = self.shared.lock().unwrap();
+                s.duration > 0.0 && s.position < s.duration * 0.25
+            };
+            if early {
+                return;
+            }
+        }
         let have = self.prefetch.as_ref().map(|(id, _)| *id == next.id).unwrap_or(false);
         if have || self.prefetching.is_some() {
             return;
@@ -950,13 +1037,17 @@ impl Engine {
     }
 
     fn play_loaded(&mut self, bytes: Vec<u8>) {
+        self.play_bytes(bytes.into());
+    }
+
+    /// Проиграть готовые байты трека (с диска, из кэша или из сети).
+    fn play_bytes(&mut self, bytes: Arc<[u8]>) {
         let Some(t) = self.current.clone() else { return };
         if !self.ensure_audio() {
             self.error("Не найдено аудиоустройство");
             self.sh().loading = false;
             return;
         }
-        let bytes: Arc<[u8]> = bytes.into();
         let src = match Decoder::new(Cursor::new(bytes.clone())) {
             Ok(s) => s,
             Err(e) => {
@@ -977,7 +1068,54 @@ impl Engine {
                 sink.play()
             }
         }
-        self.current_bytes = Some(bytes);
+        self.current_bytes = Some(bytes.clone());
+        // Держим последние три трека: переключение назад и «туда-обратно» играет мгновенно.
+        self.cache.retain(|(id, _)| id != &t.id);
+        self.cache.push((t.id.clone(), bytes));
+        if self.cache.len() > 3 {
+            self.cache.remove(0);
+        }
+        self.loaded = true;
+        self.errors_in_row = 0;
+        self.sh().loading = false;
+        self.feedback("trackStarted", Some(t.full_id()), None);
+        self.prefetch_next();
+    }
+
+    /// Играть трек по мере загрузки: декодер читает общий буфер, звук начинается
+    /// с первых мегабайт, а не после полной загрузки файла.
+    fn play_stream(&mut self, shared: Arc<crate::stream::Shared>, total: Option<u64>) {
+        let Some(t) = self.current.clone() else { return };
+        if !self.ensure_audio() {
+            self.error("Не найдено аудиоустройство");
+            self.sh().loading = false;
+            return;
+        }
+        let reader = crate::stream::Reader::new(shared.clone(), total);
+        let dec = match Decoder::new(reader) {
+            Ok(d) => d,
+            Err(e) => {
+                // Декодер не принял поток — качаем целиком, как раньше.
+                log(format!("поток не открылся ({e}) — качаем трек целиком"));
+                self.start_full_download();
+                return;
+            }
+        };
+        let src = Eq::new(dec.convert_samples::<f32>(), self.eq.clone());
+        let vol = self.volume * self.volume;
+        let paused = self.paused;
+        if let Some(sink) = self.sink() {
+            sink.clear();
+            sink.set_volume(vol);
+            sink.append(src);
+            if paused {
+                sink.pause()
+            } else {
+                sink.play()
+            }
+        }
+        // Целиком в памяти трека нет: повтор и «назад» пойдут через кэш или новую загрузку.
+        self.current_bytes = None;
         self.loaded = true;
         self.errors_in_row = 0;
         self.sh().loading = false;

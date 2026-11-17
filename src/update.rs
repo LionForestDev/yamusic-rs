@@ -13,6 +13,7 @@ use std::time::Duration;
 pub const POLL: Duration = Duration::from_secs(30 * 60);
 
 /// Имя exe в релизе.
+#[cfg_attr(not(windows), allow(dead_code))]
 const ASSET: &str = concat!(env!("CARGO_PKG_NAME"), ".exe");
 
 /// Аргумент, с которым обновлённый exe ждёт, пока закроется старый.
@@ -38,6 +39,7 @@ fn client() -> Result<reqwest::blocking::Client, String> {
 }
 
 /// «v1.2.3» / «1.2.3» → (1, 2, 3). Пре-релизы (`/releases/latest` их и так не отдаёт) не нужны.
+#[cfg_attr(not(windows), allow(dead_code))]
 fn parse_version(s: &str) -> Option<(u32, u32, u32)> {
     let mut it = s.trim().trim_start_matches('v').split(['.', '-']).map(|p| p.parse::<u32>());
     Some((it.next()?.ok()?, it.next()?.ok()?, it.next().unwrap_or(Ok(0)).ok()?))
@@ -45,6 +47,15 @@ fn parse_version(s: &str) -> Option<(u32, u32, u32)> {
 
 /// Последний релиз, если он новее запущенной версии.
 pub fn check() -> Result<Option<Release>, String> {
+    // Самообновление подменяет файл exe — это возможно только в сборке для Windows.
+    // В Linux-сборке обновление приходит пакетом, поэтому проверку не делаем и не предлагаем.
+    #[cfg(not(windows))]
+    {
+        crate::config::log("обновления: сборка для Linux — проверка отключена");
+        return Ok(None);
+    }
+    #[cfg(windows)]
+    {
     let api = env!("CARGO_PKG_REPOSITORY").replace("https://github.com/", "https://api.github.com/repos/");
     let resp = client()?.get(format!("{api}/releases/latest")).send().map_err(|e| e.to_string())?;
     // 404 — релизов ещё нет.
@@ -74,6 +85,7 @@ pub fn check() -> Result<Option<Release>, String> {
         page: v.get("html_url").and_then(|u| u.as_str()).unwrap_or(env!("CARGO_PKG_REPOSITORY")).to_string(),
         exe,
     }))
+    }
 }
 
 fn old_path(exe: &Path) -> PathBuf {

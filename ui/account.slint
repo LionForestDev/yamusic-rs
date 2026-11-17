@@ -371,7 +371,7 @@ export component SettingsPage inherits Rectangle {
                 clicked => { App.setting("discord"); }
             }
             SettingItem {
-                title: T.t("Запускать вместе с Windows");
+                title: T.t(App.autostart-title);
                 desc: T.t("Приложение откроется в трее, без окна");
                 toggle: true;
                 on: App.autostart;

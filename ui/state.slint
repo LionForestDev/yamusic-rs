@@ -12,6 +12,8 @@ export struct TrackItem {
     liked: bool,
     explicit: bool,
     available: bool,
+    // Трек уже лежит на диске: в строке рисуем галочку.
+    downloaded: bool,
     artist-names: [string],
 }
 
@@ -379,8 +381,11 @@ export global App {
     // Статус «Слушает» в профиле Discord и что с ним сейчас.
     in property <bool> discord-on;
     in property <string> discord-status;
-    // Запуск вместе с Windows (сразу в трее).
+    // Запуск вместе с системой (сразу в трее). На Linux — «вместе с системой»,
+    // на Windows остаётся привычная формулировка.
     in property <bool> autostart;
+    // Подпись пункта автозапуска в настройках; ставится из Rust по платформе.
+    in property <string> autostart-title: "Запускать вместе с Windows";
 
     // Вход по коду устройства.
     in property <bool> logged-out;

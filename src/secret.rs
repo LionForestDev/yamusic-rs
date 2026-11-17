@@ -5,6 +5,7 @@ use base64::Engine as _;
 
 /// Дополнительная «соль» DPAPI: другие программы того же пользователя без неё не расшифруют.
 /// Старое имя оставлено намеренно: с другой солью сохранённые токены перестанут читаться.
+#[cfg_attr(not(windows), allow(dead_code))]
 const ENTROPY: &[u8] = b"yamusic-lite token v1";
 
 #[cfg(windows)]

@@ -8,6 +8,7 @@ use crate::api::{album_kind_word, Album, Api, Card, Collection, Pin, Playlist, T
 use crate::assets::Sprite;
 use crate::config::{log, Config};
 use crate::images::Images;
+use crate::local::{audio_ext, file_name, music_dir, saved_already, track_file_stem};
 use crate::net::{tracks_word, Data, ListData, Net};
 use crate::player::{After, Cmd, ListKind, Player, Repeat, Source, Status};
 use crate::win;
@@ -763,6 +764,7 @@ impl Ctx {
             liked: self.player.is_liked(&t.id),
             explicit: t.explicit,
             available: true,
+            downloaded: crate::local::is_local(t),
             artist_names: ModelRc::from(Rc::new(VecModel::from(
                 t.artist_list.iter().map(|a| SharedString::from(a.name.as_str())).collect::<Vec<_>>(),
             ))),
@@ -1069,11 +1071,21 @@ fn apply_ui_scale(ui: &AppWindow) {
     let target = base * k;
     ui.global::<App>().set_ui_scale(k);
     ui.global::<App>().set_dpr(target);
-    if (w.scale_factor() - target).abs() < 0.001 {
-        return;
+    // Linux: масштаб отдаём только разметке Slint. Подменять scale factor окна нельзя:
+    // winit продолжает сообщать свой (на Wayland — отдельный от нашего), координаты мыши
+    // расходятся с картинкой, и кнопки перестают нажиматься.
+    #[cfg(not(windows))]
+    {
+        let _ = w;
     }
-    w.dispatch_event(slint::platform::WindowEvent::ScaleFactorChanged { scale_factor: target });
-    w.dispatch_event(slint::platform::WindowEvent::Resized { size: phys.to_logical(target) });
+    #[cfg(windows)]
+    {
+        if (w.scale_factor() - target).abs() < 0.001 {
+            return;
+        }
+        w.dispatch_event(slint::platform::WindowEvent::ScaleFactorChanged { scale_factor: target });
+        w.dispatch_event(slint::platform::WindowEvent::Resized { size: phys.to_logical(target) });
+    }
 }
 
 /// Чат поддержки, как `createSupportChatUrl` оригинала.
@@ -1124,14 +1136,120 @@ fn finish_reveal(weak: slint::Weak<AppWindow>, first: bool, tries: u32) {
     win::force_foreground(h);
 }
 
+/// Признак «композитор забрал указатель»: нажатие было, отпускание до нас не дойдёт.
+/// Пока он поднят, Slint держит захват указателя на элементе заголовка, и ЛЮБОЕ следующее
+/// нажатие приходит в этот же элемент, снова запускает перетаскивание — ни одна кнопка не
+/// нажимается (медиаклавиши при этом работают: они идут не через указатель).
+#[cfg(not(windows))]
+static POINTER_STUCK: AtomicBool = AtomicBool::new(false);
+
+/// Снять «нажатую» кнопку и захват указателя. Позиция за пределами окна: попадать в
+/// элементы нельзя, иначе это будет клик.
+#[cfg(not(windows))]
+fn dispatch_pointer_release(window: &slint::Window) {
+    // Позиция за пределами окна: попадать в элементы нельзя, иначе это будет клик.
+    let outside = slint::LogicalPosition::new(-10.0, -10.0);
+    window.dispatch_event(slint::platform::WindowEvent::PointerReleased {
+        position: outside,
+        button: slint::platform::PointerEventButton::Left,
+    });
+    window.dispatch_event(slint::platform::WindowEvent::PointerExited);
+}
+
+/// Приводит окно к размеру и месту компактной плашки. Вынесено отдельной функцией,
+/// потому что на Wayland один запрос часто теряется: композитор присылает configure с
+/// прежним размером уже после нашей просьбы, и плашка остаётся большим окном.
+fn apply_mini_geometry(ui: &AppWindow, saved: Option<slint::PhysicalPosition>) {
+    let w = ui.window();
+    w.set_size(slint::LogicalSize::new(400.0, 88.0));
+    #[cfg(not(windows))]
+    sync_window_size(ui, slint::LogicalSize::new(400.0, 88.0));
+    let k = w.scale_factor();
+    let (mw, mh, gap) = ((400.0 * k) as i32, (88.0 * k) as i32, (16.0 * k) as i32);
+    let (l, t, r, b) = win::work_area(hwnd(ui));
+    let p = saved.unwrap_or(slint::PhysicalPosition::new(r - mw - gap, b - mh - gap));
+    w.set_position(slint::PhysicalPosition::new(p.x.min(r - mw).max(l), p.y.min(b - mh).max(t)));
+}
+
+/// Минимальная ширина компактной плашки: остаются только кнопки управления
+/// (обложка и подпись при этом скрываются). Согласовано с min-width в ui/app.slint.
+const MINI_MIN_W: f64 = 152.0;
+
+/// То же, но после возврата из обработчика. Синхронно ИЗ обработчика нельзя: Slint на время
+/// обработки события забирает собственное состояние указателя, и подсунутое отпускание до
+/// него не доходит — захват остаётся, а вместе с ним умирают все кнопки.
+#[cfg(not(windows))]
+fn schedule_pointer_release(ui: &AppWindow) {
+    POINTER_STUCK.store(true, Ordering::SeqCst);
+    log("ввод: перетаскивание забрал композитор — снимаем захват указателя");
+    let weak = ui.as_weak();
+    Timer::single_shot(Duration::ZERO, move || {
+        if let Some(ui) = weak.upgrade() {
+            dispatch_pointer_release(&ui.window());
+        }
+    });
+}
+
+/// Размер окна поменяли мы сами (компактный режим): Slint узнает новый логический размер
+/// только после ответа композитора, а на Wayland это асинхронно. Пока ответа нет, разметка
+/// и попадания указателя остаются по старой геометрии — кнопки «не нажимаются».
+/// Поэтому сообщаем размер сразу.
+#[cfg(not(windows))]
+fn sync_window_size(ui: &AppWindow, size: slint::LogicalSize) {
+    let w = ui.window();
+    w.dispatch_event(slint::platform::WindowEvent::Resized { size });
+    let weak = ui.as_weak();
+    Timer::single_shot(Duration::ZERO, move || {
+        if let Some(ui) = weak.upgrade() {
+            apply_ui_scale(&ui);
+        }
+    });
+}
+
+/// Пишем в журнал размер окна после того, как изменение закончилось: при
+/// перетаскивании за край событий много, а нужен только итоговый размер.
+#[cfg(not(windows))]
+fn log_window_size(ui: &AppWindow) {
+    use std::cell::RefCell;
+    thread_local! {
+        static LAST: RefCell<Option<(u32, u32)>> = const { RefCell::new(None) };
+    }
+    let weak = ui.as_weak();
+    Timer::single_shot(Duration::from_millis(400), move || {
+        let Some(ui) = weak.upgrade() else { return };
+        let s = ui.window().size();
+        let changed = LAST.with(|l| {
+            let mut l = l.borrow_mut();
+            if *l != Some((s.width, s.height)) {
+                *l = Some((s.width, s.height));
+                true
+            } else {
+                false
+            }
+        });
+        if changed {
+            log(format!("окно: {}x{} физических пикселей", s.width, s.height));
+        }
+    });
+}
+
 fn hwnd(ui: &AppWindow) -> isize {
-    use winit::raw_window_handle::{HasWindowHandle, RawWindowHandle};
-    ui.window()
-        .with_winit_window(|w| match w.window_handle().map(|h| h.as_raw()) {
-            Ok(RawWindowHandle::Win32(h)) => h.hwnd.get(),
-            _ => 0,
-        })
-        .unwrap_or(0)
+    #[cfg(windows)]
+    {
+        use slint::winit_030::winit::raw_window_handle::{HasWindowHandle, RawWindowHandle};
+        ui.window()
+            .with_winit_window(|w| match w.window_handle().map(|h| h.as_raw()) {
+                Ok(RawWindowHandle::Win32(h)) => h.hwnd.get(),
+                _ => 0,
+            })
+            .unwrap_or(0)
+    }
+    // На Linux HWND нет. Остальному коду достаточно знать, что окно уже создано —
+    // это и есть признак «winit-окно появилось» (аналог появления HWND на Windows).
+    #[cfg(not(windows))]
+    {
+        ui.window().with_winit_window(|_| 1isize).unwrap_or(0)
+    }
 }
 
 fn notifier() -> Arc<dyn Fn() + Send + Sync> {
@@ -1386,6 +1504,12 @@ pub fn run(start_hidden: bool) -> Result<(), slint::PlatformError> {
     }
 
     let ui = AppWindow::new()?;
+    // Linux: оконные операции идут через сам компонент Slint (HWND там нет).
+    #[cfg(not(windows))]
+    win::register(ui.as_weak());
+    // Медиаклавиши и панель KDE управляют плеером через MPRIS.
+    #[cfg(not(windows))]
+    crate::mpris::start();
     ui.global::<Theme>().set_dark(true);
     let lite = cfg.mode == "lite";
     apply_mode(&ui, lite);
@@ -1406,6 +1530,12 @@ pub fn run(start_hidden: bool) -> Result<(), slint::PlatformError> {
     app.set_tracks(ModelRc::from(tracks.clone()));
     app.set_version(env!("CARGO_PKG_VERSION").into());
     app.set_app_name(env!("APP_NAME").into());
+    // На Linux автозапуск — вместе с системой (freedesktop), а не «с Windows».
+    app.set_autostart_title(if cfg!(windows) {
+        SharedString::from("Запускать вместе с Windows")
+    } else {
+        SharedString::from("Запускать вместе с системой")
+    });
     app.set_theme_mode(cfg.theme.clone().into());
     app.set_lang(cfg.lang.clone().into());
     ui.global::<T>().set_lang(cfg.lang.clone().into());
@@ -1419,6 +1549,8 @@ pub fn run(start_hidden: bool) -> Result<(), slint::PlatformError> {
     app.set_discord_on(cfg.discord_enabled);
     app.set_autostart(win::autostart_enabled());
     app.set_download_dir(music_dir(&cfg).display().to_string().into());
+    // По этому каталогу плеер ищет скачанный файл, а строки списков — галочку «скачано».
+    crate::local::set_dir(music_dir(&cfg));
     let ctx = Rc::new(Ctx {
         ui: ui.as_weak(),
         lite: Cell::new(lite),
@@ -1651,6 +1783,9 @@ pub fn run(start_hidden: bool) -> Result<(), slint::PlatformError> {
             ui.window().with_winit_window(|w| {
                 let _ = w.drag_window();
             });
+            // Перетаскивание забрал композитор — отпускание кнопки к нам не придёт.
+            #[cfg(not(windows))]
+            schedule_pointer_release(&ui);
         }
     });
     let weak = ui.as_weak();
@@ -1666,32 +1801,70 @@ pub fn run(start_hidden: bool) -> Result<(), slint::PlatformError> {
             normal.set(Some((w.position(), w.size(), w.is_maximized())));
             app.set_mini(true);
             app.set_maximized(false);
+            // Сначала снимаем «развёрнуто», и только потом просим размер плашки: если просить
+            // размер сразу, композитор успевает прислать configure со старым (до разворота)
+            // размером уже после нашей просьбы, и плашка остаётся большим окном.
             w.set_maximized(false);
             // Slint обновит ограничения размера только на следующем кадре, а Windows без этого не даст ужать окно.
+            // Минимум в компактном режиме — почти до самих кнопок управления (обложка
+            // и подпись при этом скрываются, см. MiniPlayer в playerbar.slint).
             w.with_winit_window(|ww| {
                 ww.set_maximized(false);
-                ww.set_min_inner_size(Some(LogicalSize::new(320.0, 88.0)));
+                ww.set_min_inner_size(Some(LogicalSize::new(MINI_MIN_W, 88.0)));
             });
-            w.set_size(slint::LogicalSize::new(400.0, 88.0));
-            let k = w.scale_factor();
-            let (mw, mh, gap) = ((400.0 * k) as i32, (88.0 * k) as i32, (16.0 * k) as i32);
-            let (l, t, r, b) = win::work_area(hwnd(&ui));
-            let p = mini_pos.get().unwrap_or(slint::PhysicalPosition::new(r - mw - gap, b - mh - gap));
-            w.set_position(slint::PhysicalPosition::new(p.x.min(r - mw).max(l), p.y.min(b - mh).max(t)));
+            apply_mini_geometry(&ui, mini_pos.get());
+            let weak = ui.as_weak();
+            let saved = mini_pos.get();
+            // Второй заход: на Wayland configure асинхронный, 100 мс обычно хватает,
+            // но если композитор ответил позже — повторяем просьбу ещё раз.
+            Timer::single_shot(Duration::from_millis(100), move || {
+                if let Some(ui) = weak.upgrade() {
+                    if ui.global::<App>().get_mini() {
+                        apply_mini_geometry(&ui, saved);
+                    }
+                }
+            });
+            let weak = ui.as_weak();
+            Timer::single_shot(Duration::from_millis(400), move || {
+                if let Some(ui) = weak.upgrade() {
+                    if ui.global::<App>().get_mini() {
+                        apply_mini_geometry(&ui, saved);
+                    }
+                }
+            });
         } else {
             mini_pos.set(Some(w.position()));
             app.set_mini(false);
-            w.with_winit_window(|ww| ww.set_min_inner_size(Some(LogicalSize::new(960.0, 640.0))));
+            // Порядок важен: сначала просим прежний размер и место и только потом поднимаем
+            // минимум. Если поднять минимум первым, композитор успевает поджать окно до него
+            // раньше нашей просьбы — и окно остаётся маленьким после выхода из плашки.
             match normal.take() {
                 Some((pos, size, max)) => {
                     w.set_size(size);
                     w.set_position(pos);
-                    if max {
-                        w.set_maximized(true);
-                        app.set_maximized(true);
-                    }
+                    #[cfg(not(windows))]
+                    sync_window_size(&ui, size.to_logical(w.scale_factor()));
+                    let weak = ui.as_weak();
+                    Timer::single_shot(Duration::from_millis(120), move || {
+                        let Some(ui) = weak.upgrade() else { return };
+                        let w = ui.window();
+                        w.with_winit_window(|ww| ww.set_min_inner_size(Some(LogicalSize::new(960.0, 640.0))));
+                        if max {
+                            w.set_maximized(true);
+                            ui.global::<App>().set_maximized(true);
+                        }
+                        // Композитор мог применить размер не сразу — повторяем просьбу по факту.
+                        let s = w.size();
+                        #[cfg(not(windows))]
+                        sync_window_size(&ui, s.to_logical(w.scale_factor()));
+                    });
                 }
-                None => w.set_size(slint::LogicalSize::new(1280.0, 800.0)),
+                None => {
+                    w.set_size(slint::LogicalSize::new(1280.0, 800.0));
+                    #[cfg(not(windows))]
+                    sync_window_size(&ui, slint::LogicalSize::new(1280.0, 800.0));
+                    w.with_winit_window(|ww| ww.set_min_inner_size(Some(LogicalSize::new(960.0, 640.0))));
+                }
             }
         }
     });
@@ -1703,6 +1876,10 @@ pub fn run(start_hidden: bool) -> Result<(), slint::PlatformError> {
             ui.window().with_winit_window(|w| {
                 let _ = w.drag_resize_window(d);
             });
+            // Изменение размера тоже забирает композитор: снимаем «нажатую» кнопку,
+            // иначе первый клик после ресайза проглатывается.
+            #[cfg(not(windows))]
+            schedule_pointer_release(&ui);
         }
     });
     let weak = ui.as_weak();
@@ -1720,15 +1897,21 @@ pub fn run(start_hidden: bool) -> Result<(), slint::PlatformError> {
         }
     });
     // Как у оригинала на Windows: пока играет трек, окно прячется в трей, иначе приложение закрывается.
+    // Где трея нет (Linux), окно сворачивается в панель задач — иначе его было бы не вернуть.
     let weak = ui.as_weak();
     let p = player.clone();
     app.on_close(move || {
         if p.state().playing {
             if let Some(ui) = weak.upgrade() {
-                let h = hwnd(&ui);
-                if h != 0 {
-                    win::hide(h);
-                    win::trim_memory();
+                if win::hide_to_tray() {
+                    let h = hwnd(&ui);
+                    if h != 0 {
+                        win::hide(h);
+                        win::trim_memory();
+                        return;
+                    }
+                } else {
+                    ui.window().set_minimized(true);
                     return;
                 }
             }
@@ -1781,9 +1964,35 @@ pub fn run(start_hidden: bool) -> Result<(), slint::PlatformError> {
         },
     );
 
-    ui.window().on_winit_window_event(|_, ev| {
+    ui.window().on_winit_window_event(|window, ev| {
         use slint::winit_030::EventResult;
         use winit::event::{ElementState, MouseButton, WindowEvent};
+        if std::env::var_os("YAMUSIC_INPUT_LOG").is_some() {
+            log(format!("ввод: {ev:?}"));
+        }
+        // Композитор забрал указатель на перетаскивании или ресайзе — отпускание кнопки до
+        // нас не приходит, и Slint держит захват указателя на элементе заголовка. Пока его
+        // не снять, каждое следующее нажатие снова уходит в перетаскивание: кнопки мертвы,
+        // а медиаклавиши работают. Хук вызывается ДО обработки события в Slint, поэтому
+        // состояние указателя здесь ещё целое и снимается корректно.
+        #[cfg(not(windows))]
+        {
+            if POINTER_STUCK.load(Ordering::SeqCst) {
+                match ev {
+                    WindowEvent::MouseInput { state: ElementState::Released, .. } => {
+                        POINTER_STUCK.store(false, Ordering::SeqCst);
+                    }
+                    WindowEvent::MouseInput { state: ElementState::Pressed, .. }
+                    | WindowEvent::CursorEntered { .. }
+                    | WindowEvent::CursorMoved { .. } => {
+                        POINTER_STUCK.store(false, Ordering::SeqCst);
+                        log("ввод: захват указателя снят, клики снова работают");
+                        dispatch_pointer_release(window);
+                    }
+                    _ => {}
+                }
+            }
+        }
         match ev {
             WindowEvent::MouseInput { state: ElementState::Pressed, button: MouseButton::Back, .. } => {
                 with_ctx(|c| c.go_back());
@@ -1798,7 +2007,19 @@ pub fn run(start_hidden: bool) -> Result<(), slint::PlatformError> {
     });
 
     let tick = Timer::default();
-    tick.start(TimerMode::Repeated, Duration::from_millis(250), || with_ctx(|c| c.sync_player()));
+    tick.start(TimerMode::Repeated, Duration::from_millis(250), || {
+        // Второй запуск просит показать окно (Linux: сигнал через сокет единственного экземпляра).
+        if win::take_wake() {
+            with_ctx(|c| {
+                let ui = c.ui();
+                reveal(&ui);
+            });
+        }
+        // Значок в лотке на Linux читает это состояние из своего потока.
+        #[cfg(not(windows))]
+        crate::tray::refresh();
+        with_ctx(|c| c.sync_player());
+    });
     // Строки текста переключаются точнее, чем раз в 250 мс.
     let lyric_tick = Timer::default();
     lyric_tick.start(TimerMode::Repeated, Duration::from_millis(50), || {
@@ -1811,17 +2032,20 @@ pub fn run(start_hidden: bool) -> Result<(), slint::PlatformError> {
         })
     });
 
+    // Окно уменьшилось/выросло — пересчитать масштаб разметки.
     let weak = ui.as_weak();
     app.on_window_resized(move || {
         let weak = weak.clone();
         Timer::single_shot(Duration::ZERO, move || {
             if let Some(ui) = weak.upgrade() {
                 apply_ui_scale(&ui);
+                log_window_size(&ui);
             }
         });
     });
 
-    if !start_hidden {
+    // Запуск «в трей» прячет окно только там, где значок действительно есть.
+    if !start_hidden || !win::hide_to_tray() {
         reveal(&ui);
     }
     slint::run_event_loop_until_quit()?;
@@ -1959,20 +2183,62 @@ fn card_from_playlist(p: &Playlist) -> Card {
     }
 }
 
-/// Скопировать текст в буфер обмена Windows.
-fn copy_text(text: &str) {
+/// Linux: буфер обмена без внешних программ — arboard работает и на X11, и на Wayland.
+#[cfg(not(windows))]
+fn clipboard_direct(text: &str) -> bool {
+    use std::sync::Mutex;
+    // На X11 содержимое живёт, пока живёт сам Clipboard, поэтому держим его в статике.
+    static CLIP: Mutex<Option<arboard::Clipboard>> = Mutex::new(None);
+    let Ok(mut guard) = CLIP.lock() else { return false };
+    if guard.is_none() {
+        match arboard::Clipboard::new() {
+            Ok(c) => *guard = Some(c),
+            Err(e) => {
+                log(format!("буфер обмена недоступен: {e}"));
+                return false;
+            }
+        }
+    }
+    match guard.as_mut().map(|c| c.set_text(text.to_string())) {
+        Some(Ok(())) => true,
+        Some(Err(e)) => {
+            log(format!("буфер обмена: {e}"));
+            false
+        }
+        None => false,
+    }
+}
+
+/// Скопировать текст в буфер обмена. `false` — не удалось ни одним способом.
+fn copy_text(text: &str) -> bool {
+    #[cfg(not(windows))]
+    if clipboard_direct(text) {
+        return true;
+    }
     use std::io::Write as _;
-    use std::os::windows::process::CommandExt;
-    if let Ok(mut child) = std::process::Command::new("clip")
-        .creation_flags(0x0800_0000)
-        .stdin(std::process::Stdio::piped())
-        .spawn()
-    {
+    #[cfg(windows)]
+    let programs: [(&str, &[&str]); 1] = [("clip", &[])];
+    // Wayland — wl-copy, X11 — xclip, запасной вариант — xsel.
+    #[cfg(not(windows))]
+    let programs: [(&str, &[&str]); 3] = [("wl-copy", &[]), ("xclip", &["-selection", "clipboard"]), ("xsel", &["--clipboard", "--input"])];
+    for (program, args) in programs {
+        let mut cmd = std::process::Command::new(program);
+        cmd.args(args).stdin(std::process::Stdio::piped()).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null());
+        #[cfg(windows)]
+        {
+            use std::os::windows::process::CommandExt;
+            cmd.creation_flags(0x0800_0000);
+        }
+        let Ok(mut child) = cmd.spawn() else { continue };
         if let Some(mut stdin) = child.stdin.take() {
             let _ = stdin.write_all(text.as_bytes());
         }
-        let _ = child.wait();
+        if child.wait().map(|s| s.success()).unwrap_or(false) {
+            return true;
+        }
     }
+    log("буфер обмена: нет ни arboard, ни wl-copy/xclip/xsel");
+    false
 }
 
 fn track_link(t: &Track) -> String {
@@ -1989,33 +2255,6 @@ fn iframe_code(path: &str, w: u32, h: u32, link: &str) -> String {
     )
 }
 
-/// Имя файла или папки, которое Windows точно примет: без запрещённых и управляющих
-/// символов, без точки и пробела в конце, не зарезервированное (CON, NUL, COM1…), не длиннее `max`.
-fn file_name_max(s: &str, max: usize) -> String {
-    let mut out: String = s
-        .chars()
-        .map(|c| if "\\/:*?\"<>|".contains(c) || (c as u32) < 0x20 { '_' } else { c })
-        .collect();
-    if out.chars().count() > max {
-        out = out.chars().take(max).collect();
-    }
-    let out = out.trim_end_matches(['.', ' ']).trim_start().to_string();
-    if out.is_empty() {
-        return "_".into();
-    }
-    let stem = out.split('.').next().unwrap_or("").trim_end().to_ascii_uppercase();
-    let reserved = matches!(stem.as_str(), "CON" | "PRN" | "AUX" | "NUL")
-        || (stem.len() == 4 && (stem.starts_with("COM") || stem.starts_with("LPT")) && stem.as_bytes()[3].is_ascii_digit());
-    if reserved {
-        format!("_{out}")
-    } else {
-        out
-    }
-}
-
-fn file_name(s: &str) -> String {
-    file_name_max(s, 100)
-}
 
 impl Ctx {
     // ---------- вход ----------
@@ -2524,6 +2763,10 @@ impl Ctx {
                 let mut st = self.st.borrow_mut();
                 st.cfg.download_dir = dir;
                 st.cfg.save();
+                // Новый каталог сразу становится тем, по которому ищутся скачанные треки.
+                crate::local::set_dir(music_dir(&st.cfg));
+                drop(st);
+                self.apply_filter();
             }
             "about" => win::open_url(env!("CARGO_PKG_REPOSITORY")),
             "discord" => {
@@ -2901,6 +3144,8 @@ impl Ctx {
                         Ok(p) => format!("Сохранено: {}", p.display()),
                         Err(e) => format!("Не удалось скачать: {e}"),
                     });
+                    // Галочка «скачано» в строке появляется сразу после сохранения.
+                    let _ = slint::invoke_from_event_loop(|| with_ctx(|c| c.apply_filter()));
                 });
             }
             "next" => {
@@ -3485,40 +3730,17 @@ impl Ctx {
             } else {
                 format!("Скачано {ok} из {total}, не удалось {failed}: {}", dir.display())
             });
-            let _ = slint::invoke_from_event_loop(|| with_ctx(|c| c.st.borrow_mut().downloading = false));
+            let _ = slint::invoke_from_event_loop(|| {
+                with_ctx(|c| {
+                    c.st.borrow_mut().downloading = false;
+                    // Галочки «скачано» появляются сразу, без перезагрузки страницы.
+                    c.apply_filter();
+                })
+            });
         });
     }
 }
 
-fn music_dir(cfg: &Config) -> std::path::PathBuf {
-    if !cfg.download_dir.is_empty() {
-        return cfg.download_dir.clone().into();
-    }
-    std::path::PathBuf::from(std::env::var("USERPROFILE").unwrap_or_else(|_| ".".into())).join("Music").join("Яндекс Музыка")
-}
-
-/// Расширение по первым байтам: mp3, AAC (ADTS), MP4 или FLAC.
-fn audio_ext(b: &[u8]) -> &'static str {
-    match b {
-        [b'I', b'D', b'3', ..] => "mp3",
-        [_, _, _, _, b'f', b't', b'y', b'p', ..] => "m4a",
-        [b'f', b'L', b'a', b'C', ..] => "flac",
-        [0xFF, x, ..] if x & 0xF6 == 0xF0 => "aac",
-        _ => "mp3",
-    }
-}
-
-fn track_file_stem(t: &Track) -> String {
-    file_name_max(&format!("{} — {}", t.artists, t.title), 120)
-}
-
-/// Трек уже скачан: готовый файл (не `.part`) с ненулевым размером.
-fn saved_already(dir: &std::path::Path, t: &Track) -> bool {
-    let stem = track_file_stem(t);
-    ["mp3", "m4a", "aac", "flac"]
-        .iter()
-        .any(|e| std::fs::metadata(dir.join(format!("{stem}.{e}"))).is_ok_and(|m| m.len() > 0))
-}
 
 /// Скачать трек: сначала в `.part`, теги — в mp3, и только после этого переименовать в
 /// готовое имя. Обрыв оставит лишь `.part`, который следующая попытка перезапишет.
@@ -3683,11 +3905,15 @@ fn register_extra(app: &App) {
             }
         })
     });
-    app.on_login_open(|| win::open_url("https://ya.ru/device"));
+    app.on_login_open(|| {
+        log("кнопка «Открыть ya.ru/device» нажата");
+        win::open_url("https://ya.ru/device");
+    });
     app.on_login_copy(|| {
+        log("кнопка «Скопировать код» нажата");
         with_ctx(|c| {
-            copy_text(&c.ui().global::<App>().get_login_code());
-            c.toast("Код скопирован");
+            let ok = copy_text(&c.ui().global::<App>().get_login_code());
+            c.toast(if ok { "Код скопирован" } else { "Не удалось скопировать код" });
         })
     });
     app.on_menu_playlist(|i| with_ctx(|c| c.menu_playlist(i.max(0) as usize)));
@@ -3940,4 +4166,109 @@ fn register_extra(app: &App) {
         crate::eq::PRESETS.iter().map(|p| SharedString::from(p.0)).collect::<Vec<_>>(),
     ))));
     with_ctx(|c| c.apply_eq());
+}
+
+// ---------- MPRIS: управление со стороны рабочего стола (Linux) ----------
+
+/// Состояние плеера для MPRIS: медиаклавиши и панель KDE читают его отсюда.
+#[cfg(not(windows))]
+pub fn mpris_info() -> crate::mpris::Info {
+    let mut info = crate::mpris::Info {
+        playing: false,
+        stopped: true,
+        title: String::new(),
+        artist: String::new(),
+        album: String::new(),
+        length_us: 0,
+        position_us: 0,
+        track_id: String::new(),
+        art_url: String::new(),
+        volume: 0.0,
+        can_prev: false,
+        can_next: false,
+    };
+    with_ctx(|c| {
+        let s = c.player.state();
+        info.playing = s.playing;
+        info.volume = s.volume as f64;
+        info.position_us = (s.position.max(0.0) as f64 * 1_000_000.0) as i64;
+        info.length_us = (s.duration.max(0.0) as f64 * 1_000_000.0) as i64;
+        info.stopped = s.track.is_none();
+        info.can_prev = s.track.is_some();
+        info.can_next = s.track.is_some();
+        if let Some(t) = s.track {
+            info.title = if t.version.is_empty() { t.title.clone() } else { format!("{} ({})", t.title, t.version) };
+            info.artist = t.artists.clone();
+            info.album = t.album_title.clone();
+            info.track_id = t.id.clone();
+            info.art_url = t.cover_url(400).unwrap_or_default();
+        }
+    });
+    info
+}
+
+#[cfg(not(windows))]
+pub fn mpris_play() {
+    with_ctx(|c| {
+        if !c.player.state().playing && c.player.state().track.is_some() {
+            c.player.send(Cmd::PlayPause);
+        }
+    });
+}
+
+#[cfg(not(windows))]
+pub fn mpris_pause() {
+    with_ctx(|c| {
+        if c.player.state().playing {
+            c.player.send(Cmd::PlayPause);
+        }
+    });
+}
+
+#[cfg(not(windows))]
+pub fn mpris_play_pause() {
+    with_ctx(|c| c.player.send(Cmd::PlayPause));
+}
+
+#[cfg(not(windows))]
+pub fn mpris_stop() {
+    with_ctx(|c| {
+        if c.player.state().playing {
+            c.player.send(Cmd::PlayPause);
+        }
+        c.player.send(Cmd::Seek(0.0));
+    });
+}
+
+#[cfg(not(windows))]
+pub fn mpris_next() {
+    with_ctx(|c| c.player.send(Cmd::Next));
+}
+
+#[cfg(not(windows))]
+pub fn mpris_prev() {
+    with_ctx(|c| c.player.send(Cmd::Prev));
+}
+
+#[cfg(not(windows))]
+pub fn mpris_set_volume(v: f32) {
+    with_ctx(|c| {
+        c.player.send(Cmd::Volume(v));
+        let mut st = c.st.borrow_mut();
+        st.cfg.volume = v;
+        st.cfg.save();
+    });
+}
+
+#[cfg(not(windows))]
+pub fn mpris_raise() {
+    with_ctx(|c| {
+        let ui = c.ui();
+        reveal(&ui);
+    });
+}
+
+#[cfg(not(windows))]
+pub fn mpris_quit() {
+    quit();
 }

@@ -21,7 +21,7 @@ base64 = "0.22"
 image = { version = "0.25", default-features = false, features = ["jpeg", "png", "webp"] }
 miniz_oxide = "0.8"
 
-[dependencies.windows-sys]
+[target.'cfg(windows)'.dependencies.windows-sys]
 version = "0.59"
 features = [
   "Win32_Foundation",
@@ -41,6 +41,11 @@ features = [
   "Win32_UI_Shell_Common",
   "Win32_System_Com",
 ]
+
+[target.'cfg(target_os="linux")'.dependencies]
+arboard = { version = "3", features = ["wayland-data-control"] }
+ksni = { version = "0.3.7", default-features = false, features = ["async-io", "blocking"] }
+zbus = { version = "5", default-features = false, features = ["async-io", "blocking-api"] }
 
 [build-dependencies]
 slint-build = "1.18"

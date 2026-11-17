@@ -74,7 +74,9 @@ export component AppWindow inherits Window {
     always-on-top: App.mini;
     preferred-width: 1280px;
     preferred-height: 800px;
-    min-width: App.mini ? 320px : 960px;
+    // В компактном режиме окно можно ужать почти до самих кнопок управления:
+    // подпись и обложка при этом скрываются (см. MiniPlayer).
+    min-width: App.mini ? 152px : 960px;
     min-height: App.mini ? 88px : 640px;
     default-font-family: "YS Text";
     default-font-size: 16px;
@@ -380,4 +382,12 @@ export component AppWindow inherits Window {
         width: parent.width;
         height: parent.height;
     }
+
+    // В компактном режиме плашка перекрывает обычные полосы ресайза — добавляем свои поверх,
+    // иначе плашку нельзя ужать (а она должна уменьшаться почти до самих кнопок).
+    if App.mini: ResizeEdge { dir: 2; x: parent.width - 4px; y: 8px; width: 4px; height: parent.height - 16px; }
+    if App.mini: ResizeEdge { dir: 6; x: 0; y: 8px; width: 4px; height: parent.height - 16px; }
+    if App.mini: ResizeEdge { dir: 4; x: 8px; y: parent.height - 4px; width: parent.width - 16px; height: 4px; }
+    if App.mini: ResizeEdge { dir: 3; x: parent.width - 8px; y: parent.height - 8px; width: 8px; height: 8px; }
+    if App.mini: ResizeEdge { dir: 5; x: 0; y: parent.height - 8px; width: 8px; height: 8px; }
 }

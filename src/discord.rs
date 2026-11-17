@@ -38,11 +38,30 @@ fn now_ms() -> i64 {
     SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_millis() as i64).unwrap_or(0)
 }
 
+/// Где Discord ждёт подключения: на Windows — именованный канал, на Linux — сокет
+/// в каталоге времени выполнения (`discord-ipc-0`, `-1`, …).
+#[cfg(windows)]
+fn ipc_path(i: u32) -> Option<std::path::PathBuf> {
+    Some(std::path::PathBuf::from(format!(r"\\.\pipe\discord-ipc-{i}")))
+}
+
+#[cfg(not(windows))]
+fn ipc_path(i: u32) -> Option<std::path::PathBuf> {
+    // Порядок каталогов — как в самом Discord: XDG_RUNTIME_DIR, затем TMPDIR, TMP, TEMP, /tmp.
+    ["XDG_RUNTIME_DIR", "TMPDIR", "TMP", "TEMP"]
+        .iter()
+        .filter_map(|v| std::env::var_os(v).map(std::path::PathBuf::from))
+        .find(|p| p.is_dir())
+        .or_else(|| Some(std::path::PathBuf::from("/tmp")))
+        .map(|base| base.join(format!("discord-ipc-{i}")))
+}
+
 impl Conn {
     fn connect(app_id: &str) -> Result<Conn, String> {
         let mut last = "Discord не запущен".to_string();
         for i in 0..10 {
-            let Ok(pipe) = OpenOptions::new().read(true).write(true).open(format!(r"\\.\pipe\discord-ipc-{i}")) else {
+            let Some(path) = ipc_path(i) else { continue };
+            let Ok(pipe) = OpenOptions::new().read(true).write(true).open(path) else {
                 continue;
             };
             let mut c = Conn { pipe, nonce: 0 };
