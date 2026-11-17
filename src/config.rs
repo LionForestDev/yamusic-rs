@@ -68,6 +68,24 @@ impl Default for Config {
     }
 }
 
+/// Кэш шрифтов и значков: на Linux — XDG_CACHE_HOME (~/.cache), на Windows — папка настроек.
+/// Скачанные с веб-версии файлы — это кэш, его место не в каталоге конфигурации.
+pub fn cache_dir() -> PathBuf {
+    #[cfg(windows)]
+    {
+        return dir();
+    }
+    #[cfg(not(windows))]
+    {
+        let base = std::env::var_os("XDG_CACHE_HOME")
+            .map(PathBuf::from)
+            .filter(|p| p.is_absolute())
+            .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".cache")))
+            .unwrap_or_else(|| PathBuf::from("."));
+        base.join("yamusic-rs")
+    }
+}
+
 /// %APPDATA%\yamusic-rs. Папка прежнего названия (yamusic-lite, ещё раньше yawave) переносится
 /// молча, вместе с токеном и настройками. Если её держит запущенная старая версия, этот запуск
 /// работает со старой папкой, а перенос повторится в следующий раз.
@@ -107,6 +125,17 @@ impl Config {
         if c.token.is_none() && c.token_sealed.is_some() {
             log("токен не расшифровался (другая учётная запись Windows?) — нужно войти заново");
         }
+        // Linux: сначала пробуем связку ключей рабочего стола (Secret Service).
+        #[cfg(not(windows))]
+        {
+            use crate::secret::keyring;
+            if c.token.is_none() {
+                c.token = keyring::load("access");
+            }
+            if c.refresh_token.is_none() {
+                c.refresh_token = keyring::load("refresh");
+            }
+        }
         if let Some(plain) = c.token_plain.clone().filter(|t| !t.trim().is_empty()) {
             if c.token.is_none() {
                 c.token = Some(plain.trim().to_string());
@@ -124,6 +153,30 @@ impl Config {
         disk.refresh_sealed = self.refresh_token.as_deref().and_then(crate::secret::seal);
         // Без DPAPI (не Windows) — открытым текстом, как раньше.
         disk.token_plain = if disk.token_sealed.is_none() { self.token.clone() } else { None };
+        // Linux: токен и refresh уходят в связку ключей рабочего стола (GNOME Keyring, KWallet).
+        // Только если связки нет — остаётся прежний открытый текст в config.json.
+        #[cfg(not(windows))]
+        {
+            use crate::secret::keyring;
+            if keyring::available() {
+                if let Some(t) = self.token.as_deref() {
+                    if keyring::save("access", t) {
+                        disk.token_plain = None;
+                    }
+                }
+                match self.refresh_token.as_deref() {
+                    Some(r) => {
+                        keyring::save("refresh", r);
+                    }
+                    None => {
+                        if self.token.is_none() {
+                            keyring::clear("access");
+                            keyring::clear("refresh");
+                        }
+                    }
+                }
+            }
+        }
         if let Ok(s) = serde_json::to_string_pretty(&disk) {
             let path = dir().join("config.json");
             let tmp = dir().join("config.json.tmp");

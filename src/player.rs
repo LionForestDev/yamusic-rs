@@ -955,6 +955,7 @@ impl Engine {
                 let _ = tx.send(Msg::Audio { gen, res: Ok(bytes) });
                 return;
             }
+            log(format!("«{}» нет на диске — играем из сети", t.title));
             // Сколько накопить, чтобы начинать играть: около секунды-двух загрузки.
             const START_BYTES: usize = 1024 * 1024;
             let url = match api.stream_url(&t.id) {

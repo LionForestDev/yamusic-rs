@@ -105,7 +105,7 @@ const WEB_ORIGIN: &str = "https://music.yandex.ru";
 
 impl WebCache {
     fn new() -> WebCache {
-        WebCache { dir: crate::config::dir().join("assets"), http: None }
+        WebCache { dir: crate::config::cache_dir().join("assets"), http: None }
     }
 
     fn read(&mut self, path: &str) -> Option<Vec<u8>> {

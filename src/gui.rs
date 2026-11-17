@@ -1550,8 +1550,14 @@ pub fn run(start_hidden: bool) -> Result<(), slint::PlatformError> {
     app.set_autostart(win::autostart_enabled());
     app.set_download_dir(music_dir(&cfg).display().to_string().into());
     // По этому каталогу плеер ищет скачанный файл, а строки списков — галочку «скачано».
-    crate::local::set_dir(music_dir(&cfg));
-    log(format!("скачанные треки ищем в: {}", music_dir(&cfg).display()));
+    // Скачанные треки ищем в нескольких местах: настройка, XDG-музыка, Music, Музыка,
+    // старый путь от каталога запуска. В журнале видно, что реально найдено.
+    let local_dirs = crate::local::candidates(&cfg);
+    for d in &local_dirs {
+        let n = std::fs::read_dir(d).map(|rd| rd.flatten().count()).unwrap_or(0);
+        log(format!("скачанные треки: {} — файлов {n}", d.display()));
+    }
+    crate::local::set_dirs(local_dirs);
     let ctx = Rc::new(Ctx {
         ui: ui.as_weak(),
         lite: Cell::new(lite),
@@ -2765,8 +2771,9 @@ impl Ctx {
                 st.cfg.download_dir = dir;
                 st.cfg.save();
                 // Новый каталог сразу становится тем, по которому ищутся скачанные треки.
-                crate::local::set_dir(music_dir(&st.cfg));
+                let dirs = crate::local::candidates(&st.cfg);
                 drop(st);
+                crate::local::set_dirs(dirs);
                 self.apply_filter();
             }
             "about" => win::open_url(env!("CARGO_PKG_REPOSITORY")),
@@ -3146,7 +3153,12 @@ impl Ctx {
                         Err(e) => format!("Не удалось скачать: {e}"),
                     });
                     // Галочка «скачано» в строке появляется сразу после сохранения.
-                    let _ = slint::invoke_from_event_loop(|| with_ctx(|c| c.apply_filter()));
+                    let _ = slint::invoke_from_event_loop(|| {
+                        with_ctx(|c| {
+                            crate::local::refresh();
+                            c.apply_filter();
+                        })
+                    });
                 });
             }
             "next" => {
@@ -3735,6 +3747,7 @@ impl Ctx {
                 with_ctx(|c| {
                     c.st.borrow_mut().downloading = false;
                     // Галочки «скачано» появляются сразу, без перезагрузки страницы.
+                    crate::local::refresh();
                     c.apply_filter();
                 })
             });
