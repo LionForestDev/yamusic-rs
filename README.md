@@ -153,7 +153,24 @@ Copyright © 2026 Spolzer, лицензия GPL-3.0. Форк распростр
 Форк собирается и проверяется только на **Arch Linux** (x86_64). Другие дистрибутивы не тестировались:
 код опирается на X11/XWayland, D-Bus, StatusNotifierItem и MPRIS, и на них поведение может отличаться.
 
-### Способ 1: пакет из PKGBUILD
+### Способ 1: готовый архив из релиза (без сборки)
+
+На странице [релизов](../../releases/latest) лежит архив `yamusic-rs-<версия>-linux.tar.gz`:
+готовый бинарник, ярлык, иконки и установщик. Сборка не нужна.
+
+```bash
+tar -xzf yamusic-rs-2.0.10-linux-r23.tar.gz
+cd yamusic-rs-2.0.10-linux
+sudo ./install.sh          # в /usr/local; PREFIX=/usr sudo ./install.sh — как пакет
+```
+
+Удалить потом: `sudo ./install.sh --uninstall`. Рядом с архивом лежит `SHA256SUMS.txt`,
+сверить перед установкой: `sha256sum -c SHA256SUMS.txt`.
+
+Архив собран из этой же ветки, но пакетный способ ниже предпочтительнее: pacman будет знать,
+какие файлы принадлежат пакету, и обновление пройдёт штатно.
+
+### Способ 2: пакет из PKGBUILD
 
 ```bash
 git clone https://github.com/LionForestDev/yamusic-rs.git
@@ -164,7 +181,7 @@ makepkg -si
 Пакет соберёт бинарник из исходников этой ветки и поставит: плеер в `/usr/bin/yamusic-rs`,
 ярлык в меню, иконки в hicolor, виджет для панели KDE в `/usr/share/plasma/plasmoids`.
 
-### Способ 2: вручную из исходников
+### Способ 3: вручную из исходников
 
 ```bash
 sudo pacman -S --needed base-devel git rust alsa-lib dbus fontconfig freetype2 \
@@ -452,6 +469,11 @@ git push origin v1.0.1
 push и pull request exe тоже собирается, его можно скачать из артефактов сборки. Встроенная
 обновлялка ищет в релизе файл с именем ровно `yamusic-rs.exe` и сверяет его с `digest`, который
 GitHub считает при загрузке.
+
+Релизы форка для Linux собираются вручную из ветки `lionforest2.09`: тег вида `v2.0.10-r23`,
+к нему приложены архив `yamusic-rs-<версия>-linux-r<сборка>.tar.gz` и `SHA256SUMS.txt`.
+Готовых `.deb`, `.rpm` и AppImage нет — только архив и пакет из `packaging/PKGBUILD`.
+Автопроверки обновлений в Linux-сборке нет: обновление — установкой нового архива или через pacman.
 
 ## Лицензия
 
