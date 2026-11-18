@@ -6,6 +6,9 @@
 
 **Интерфейс официального приложения Яндекс Музыки на Rust: один exe и в 13 раз меньше памяти.**
 
+> **Это форк.** Собирается и поддерживается только под **Arch Linux** — [как установить](#установка-arch-linux).
+> Что добавлено по сравнению с основным проектом — [таблица отличий](#чего-нет-в-основной-ветке).
+
 [![Релиз](https://img.shields.io/github/v/release/SpolzerMod/yamusic-rs?label=%D1%80%D0%B5%D0%BB%D0%B8%D0%B7&color=ffd60a&labelColor=1c1c1f)](https://github.com/SpolzerMod/yamusic-rs/releases/latest)
 ![Windows 10 | 11](https://img.shields.io/badge/Windows-10%20%7C%2011-2b2b30?labelColor=1c1c1f)
 [![GPL-3.0](https://img.shields.io/badge/%D0%BB%D0%B8%D1%86%D0%B5%D0%BD%D0%B7%D0%B8%D1%8F-GPL--3.0-2b2b30?labelColor=1c1c1f)](LICENSE)
@@ -54,7 +57,9 @@
 
 - версия форка: **2.0.9**, сборка r22, ветка `lionforest2.09`;
 - `main` апстрима не затрагивается: форк живёт отдельной веткой от 1.0.2;
-- сборка: `cargo build --release` (Rust 1.92+, Linux и Windows), подробности — [Для разработчиков](#для-разработчиков).
+- **сборка и поддержка — только Arch Linux** (x86_64). Как поставить — [Установка (Arch Linux)](#установка-arch-linux);
+- что у нас есть, а в основной ветке нет — [отдельная таблица](#чего-нет-в-основной-ветке);
+- сборка из исходников: `cargo build --release` (Rust 1.92+).
 
 Что сделано в форке:
 
@@ -71,6 +76,35 @@
 Основа и авторство — [SpolzerMod/yamusic-rs](https://github.com/SpolzerMod/yamusic-rs),
 Copyright © 2026 Spolzer, лицензия GPL-3.0. Форк распространяется на тех же условиях,
 исходный код доступен в этом репозитории.
+
+## Чего нет в основной ветке
+
+Форк живёт своей веткой, поэтому часть доработок есть только здесь.
+
+**Есть в форке — нет в основном проекте (1.1.x):**
+
+| Что | Что даёт |
+| --- | --- |
+| Значок в лотке на Linux (StatusNotifierItem) | KDE, GNOME с расширением, XFCE, Cinnamon: скрыть окно в трей и вернуть его, меню с управлением воспроизведением. В основной ветке трея на Linux нет вообще |
+| Виджет для панели KDE Plasma 6 | отдельный плазмоид `org.rask.yamusicrs`: «Исполнитель — Трек» и play/пауза прямо на панели, попурок с prev/play/next. Лежит в [extras/kde-widget](extras/kde-widget), ставится через `kpackagetool6` |
+| Окно на Wayland через X11 (XWayland) | Wayland не умеет скрывать и возвращать окно, поэтому на KDE Wayland трей без этого бесполезен. Откат на чистый Wayland: `YAMUSIC_NO_X11=1` |
+| Перерисовка содержимого после возврата из трея | окно не остаётся чёрным или полупустым после сворачивания и возврата |
+| Защита от «моргания» при сворачивании | перерисовка не возвращает окно на экран в момент нажатия «свернуть»: откладывается на 1,5 с и перепроверяется через 140 мс |
+| Дизлайк | кнопка «не нравится» на главной и в плеере, а не только в «Моей волне» |
+| Скачанные треки | играются с диска, в том числе из подпапок списков; у скачанного зелёная отметка |
+| Потоковое воспроизведение | сетевой трек начинает играть, не дожидаясь полной загрузки; следующий трек готовится заранее |
+| Компактный режим | узкая полоса-миниплеер с возвратом прежнего размера окна |
+| Полный список популярного у исполнителя | отдельная страница вместо блока на странице исполнителя: по 100 треков, поиск по названию, воспроизведение с любого места, «Нравится» |
+| Исправление «зажатого указателя» | после перетаскивания окна кнопки заголовка снова работают |
+
+**Есть в основной ветке — у нас этого нет** (переносили не всё, чтобы не потерять Linux-доработки):
+
+| Что | Комментарий |
+| --- | --- |
+| Discord Rich Presence | не переносили |
+| Готовые пакеты .deb, .rpm, AppImage | мы собираем только пакет для Arch Linux |
+| Смена темы на ходу без перезапуска | у нас тема применяется при запуске |
+| Отдельное окно обновления приложения | обновление — установкой новой сборки вручную |
 
 ## Возможности
 
@@ -111,7 +145,76 @@ Copyright © 2026 Spolzer, лицензия GPL-3.0. Форк распростр
 официального приложения против одного `yamusic-rs.exe`. На другом компьютере и с другими страницами
 цифры будут другими, но разница того же порядка.</sub>
 
-## Установка
+## Установка (Arch Linux)
+
+Форк собирается и проверяется только на **Arch Linux** (x86_64). Другие дистрибутивы не тестировались:
+код опирается на X11/XWayland, D-Bus, StatusNotifierItem и MPRIS, и на них поведение может отличаться.
+
+### Способ 1: пакет из PKGBUILD
+
+```bash
+git clone https://github.com/LionForestDev/yamusic-rs.git
+cd yamusic-rs/packaging
+makepkg -si
+```
+
+Пакет соберёт бинарник из исходников этой ветки и поставит: плеер в `/usr/bin/yamusic-rs`,
+ярлык в меню, иконки в hicolor, виджет для панели KDE в `/usr/share/plasma/plasmoids`.
+
+### Способ 2: вручную из исходников
+
+```bash
+sudo pacman -S --needed base-devel git rust alsa-lib dbus fontconfig freetype2 \
+  libx11 libxcursor libxi libxkbcommon libxkbcommon-x11 libxrandr wayland
+
+git clone -b lionforest2.09 https://github.com/LionForestDev/yamusic-rs.git
+cd yamusic-rs
+cargo build --release --locked
+
+sudo install -Dm755 target/release/yamusic-rs /usr/bin/yamusic-rs
+sudo install -Dm644 packaging/yamusic-rs.desktop /usr/share/applications/yamusic-rs.desktop
+for size in 16 32 48 64 128 256; do
+  sudo install -Dm644 "packaging/icons/${size}.png" \
+    "/usr/share/icons/hicolor/${size}x${size}/apps/yamusic-rs.png"
+done
+```
+
+Сборка занимает несколько минут: Skia (рендерер Slint) компилируется вместе с проектом.
+Для сборки нужен интернет — cargo скачивает зависимости.
+
+### Первый запуск
+
+1. Запустите `yamusic-rs` из меню или терминала.
+2. Войдите по коду устройства: приложение покажет код и ссылку ya.ru/device, пароль не спрашивается.
+3. Токен сохраняется в системной связке ключей (KWallet или GNOME Keyring), настройки — в
+   `~/.config/yamusic-rs`, кэш обложек и шрифтов — в `~/.cache/yamusic-rs`.
+4. Галочка «Запускать с системой» создаёт ярлык автозапуска `~/.config/autostart/yamusic-rs.desktop`
+   (это автозапуск сеанса, а не служба systemd).
+
+### Виджет для панели KDE
+
+```bash
+kpackagetool6 --type Plasma/Applet --install extras/kde-widget     # установить
+kpackagetool6 --type Plasma/Applet --upgrade extras/kde-widget     # обновить
+kpackagetool6 --type Plasma/Applet --remove org.rask.yamusicrs     # удалить
+```
+
+Нужен KDE Plasma 6.0 или новее. После установки: правый клик по панели → «Добавить элементы…» →
+«Яндекс Музыка RS». Подробности — [extras/kde-widget](extras/kde-widget).
+
+### Удаление
+
+```bash
+sudo pacman -Rns yamusic-rs          # если ставили пакетом
+rm -rf ~/.config/yamusic-rs ~/.cache/yamusic-rs
+```
+
+Скачанные треки лежат в `~/Музыка/Яндекс Музыка` — удаляйте по желанию.
+
+## Установка (Windows, основной проект)
+
+Этот раздел описывает оригинальный проект. Наш форк для Windows не собирается и не проверяется —
+для Linux смотрите [Установка (Arch Linux)](#установка-arch-linux).
 
 1. Скачайте `yamusic-rs.exe` со страницы [последнего релиза](https://github.com/SpolzerMod/yamusic-rs/releases/latest).
 2. Положите файл в любую папку, например в `Документы` или `C:\Programs`, и запустите.
@@ -145,7 +248,8 @@ Copyright © 2026 Spolzer, лицензия GPL-3.0. Форк распростр
 | **Windows 10** x64 | Должна работать: приложение использует те же API. Углы окна будут прямыми, потому что скругление есть только в Windows 11. Регулярно не проверяется, о проблемах пишите в [issues](https://github.com/SpolzerMod/yamusic-rs/issues). |
 | Windows на ARM | Должна запускаться через эмуляцию x64. Не проверялась. |
 | Windows 7 и 8.1 | Не поддерживаются: текущий Rust под них не собирает. |
-| **Linux** | В планах. Сборки AppImage будут выходить пре-релизами, тестировать будем вместе с пользователями. |
+| **Arch Linux** x86_64 | Сборка этого форка, проверяется на каждой версии. Установка — [Установка (Arch Linux)](#установка-arch-linux). |
+| Другие дистрибутивы Linux | Не проверялись: код опирается на X11/XWayland, D-Bus и MPRIS. Может работать, гарантий нет. |
 | macOS | Пока не планируется. |
 
 **Нужно ещё:**
@@ -164,6 +268,9 @@ Copyright © 2026 Spolzer, лицензия GPL-3.0. Форк распростр
 Вход идёт по коду устройства через ya.ru/device, пароль приложение не видит. Полученный токен
 шифруется средствами Windows (DPAPI) и хранится в `%APPDATA%\yamusic-rs\config.json`. Расшифровать
 его может только ваша учётная запись Windows на этом компьютере.
+
+На Linux токен хранится не в DPAPI, а в системной связке ключей (KWallet или GNOME Keyring),
+шифрованный файл настроек лежит в `~/.config/yamusic-rs`.
 
 Токен отправляется только по https и только на домены `yandex.ru` и `yandex.net`. Проверка
 встроена в код (`src/client.rs`). Кроме Яндекса приложение ходит только к `api.github.com`,
@@ -265,9 +372,14 @@ Copyright © 2026 Spolzer, лицензия GPL-3.0. Форк распростр
 ### Сборка
 
 Нужны:
-- Rust 1.92 или новее (`rustup update stable`);
-- Visual Studio Build Tools с компонентом «Разработка классических приложений на C++»
-  (MSVC и Windows SDK: из SDK берётся `rc.exe` для значка и описания exe).
+- Rust 1.92 или новее (`rustup update stable`, в Arch также пакет `rust`);
+- для Linux-сборки — системные библиотеки: `alsa-lib`, `dbus`, `fontconfig`, `freetype2`,
+  `libx11`, `libxcursor`, `libxi`, `libxkbcommon`, `libxkbcommon-x11`, `libxrandr`, `wayland`
+  (одной командой: `sudo pacman -S --needed base-devel rust alsa-lib dbus fontconfig freetype2
+  libx11 libxcursor libxi libxkbcommon libxkbcommon-x11 libxrandr wayland`);
+- для сборки под Windows, как в оригинале, — Visual Studio Build Tools с компонентом
+  «Разработка классических приложений на C++» (MSVC и Windows SDK берут `rc.exe` для значка).
+  Форк под Windows не собирается и не проверяется.
 
 ```bash
 git clone https://github.com/SpolzerMod/yamusic-rs

@@ -1,0 +1,19 @@
+{
+  "KPlugin": {
+    "Authors": [
+      {
+        "Name": "Noosphera AI"
+      }
+    ],
+    "Category": "Multimedia",
+    "Description": "Показывает исполнителя и трек из плеера «Яндекс Музыка RS» и управляет воспроизведением",
+    "Icon": "media-playback-start",
+    "Id": "org.rask.yamusicrs",
+    "License": "GPL-3.0-or-later",
+    "Name": "Яндекс Музыка RS",
+    "Version": "1.0.1"
+  },
+  "X-KDE-ParentApp": "org.kde.plasmashell",
+  "X-Plasma-API-Minimum-Version": "6.0",
+  "X-Plasma-MainScript": "ui/main.qml"
+}

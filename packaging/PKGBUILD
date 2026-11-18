@@ -1,0 +1,51 @@
+# Maintainer: форк LionForestDev <https://github.com/LionForestDev/yamusic-rs>
+#
+# Сборка из исходников ветки форка (готовых релизов в форке нет).
+# Установка: cd packaging && makepkg -si
+# При новой версии: pkgver, затем `updpkgsums && makepkg --printsrcinfo > .SRCINFO`.
+
+pkgname=yamusic-rs
+pkgver=2.0.9
+pkgrel=1
+pkgdesc='Неофициальный клиент Яндекс Музыки на Rust и Slint — сборка форка для Arch Linux'
+arch=('x86_64')
+url='https://github.com/LionForestDev/yamusic-rs'
+license=('GPL-3.0-only')
+# Wayland, X11 и xkbcommon winit открывает через dlopen, namcap их не видит.
+depends=('alsa-lib' 'dbus' 'fontconfig' 'freetype2' 'glibc' 'hicolor-icon-theme' 'libgcc'
+         'libstdc++' 'libx11' 'libxcursor' 'libxi' 'libxkbcommon' 'libxkbcommon-x11'
+         'libxrandr' 'wayland')
+optdepends=('pipewire-alsa: звук через PipeWire'
+            'pulseaudio-alsa: звук через PulseAudio'
+            'xdg-utils: открывать ссылки в браузере'
+            'zenity: выбор папки и картинки (GNOME и другие)'
+            'kdialog: выбор папки и картинки (KDE)'
+            'noto-fonts-cjk: названия на китайском, японском и корейском')
+makedepends=('cargo' 'git' 'rust')
+options=('!debug' '!strip')
+source=("$pkgname::git+$url.git#branch=lionforest2.09")
+sha256sums=('SKIP')
+
+build() {
+  cd "$srcdir/$pkgname"
+  # Оффлайн-сборки нет: cargo скачивает зависимости, Skia собирается вместе с проектом.
+  cargo build --release --locked
+}
+
+package() {
+  cd "$srcdir/$pkgname"
+
+  install -Dm755 target/release/yamusic-rs "$pkgdir/usr/bin/yamusic-rs"
+  install -Dm644 packaging/yamusic-rs.desktop \
+    "$pkgdir/usr/share/applications/yamusic-rs.desktop"
+  install -Dm644 LICENSE "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
+
+  for size in 16 32 48 64 128 256; do
+    install -Dm644 "packaging/icons/${size}.png" \
+      "$pkgdir/usr/share/icons/hicolor/${size}x${size}/apps/yamusic-rs.png"
+  done
+
+  # Виджет для панели KDE Plasma 6 (см. extras/kde-widget/README.md).
+  install -d "$pkgdir/usr/share/plasma/plasmoids/org.rask.yamusicrs"
+  cp -r extras/kde-widget/. "$pkgdir/usr/share/plasma/plasmoids/org.rask.yamusicrs/"
+}
