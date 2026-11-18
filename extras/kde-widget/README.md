@@ -1,6 +1,6 @@
 # Виджет для панели KDE Plasma
 
-Отдельный плазмоид `org.rask.yamusicrs`: показывает, что играет, и управляет плеером
+Отдельный плазмоид `org.lionforest.yamusicrs`: показывает, что играет, и управляет плеером
 прямо с панели. Плеер трогать не нужно — виджет читает стандартный интерфейс MPRIS
 (`org.mpris.MediaPlayer2.yamusic-rs`) и посылает те же команды, что медиаклавиши.
 
@@ -32,7 +32,7 @@ kpackagetool6 --type Plasma/Applet --upgrade extras/kde-widget
 Удалить:
 
 ```bash
-kpackagetool6 --type Plasma/Applet --remove org.rask.yamusicrs
+kpackagetool6 --type Plasma/Applet --remove org.lionforest.yamusicrs
 ```
 
 После установки: правый клик по панели → «Добавить элементы…» → «Яндекс Музыка RS».
@@ -45,13 +45,13 @@ systemctl --user restart plasma-plasmashell
 ## Установка из пакета
 
 Если ставили через `packaging/PKGBUILD`, виджет уже лежит в
-`/usr/share/plasma/plasmoids/org.rask.yamusicrs` — остаётся только добавить его на панель.
+`/usr/share/plasma/plasmoids/org.lionforest.yamusicrs` — остаётся только добавить его на панель.
 
 ## Состав
 
 ```
 extras/kde-widget/
-├── metadata.json          — описание плазмоида (Id: org.rask.yamusicrs, версия 1.0.1)
+├── metadata.json          — описание плазмоида (Id: org.lionforest.yamusicrs, версия 1.0.1)
 └── contents/ui/main.qml   — интерфейс и работа с MPRIS через D-Bus
 ```
 

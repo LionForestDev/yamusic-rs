@@ -86,7 +86,7 @@ Copyright © 2026 Spolzer, лицензия GPL-3.0. Форк распростр
 | Что | Что даёт |
 | --- | --- |
 | Значок в лотке на Linux (StatusNotifierItem) | KDE, GNOME с расширением, XFCE, Cinnamon: скрыть окно в трей и вернуть его, меню с управлением воспроизведением. В основной ветке трея на Linux нет вообще |
-| Виджет для панели KDE Plasma 6 | отдельный плазмоид `org.rask.yamusicrs`: «Исполнитель — Трек» и play/пауза прямо на панели, попурок с prev/play/next. Лежит в [extras/kde-widget](extras/kde-widget), ставится через `kpackagetool6` |
+| Виджет для панели KDE Plasma 6 | отдельный плазмоид `org.lionforest.yamusicrs`: «Исполнитель — Трек» и play/пауза прямо на панели, попурок с prev/play/next. Лежит в [extras/kde-widget](extras/kde-widget), ставится через `kpackagetool6` |
 | Окно на Wayland через X11 (XWayland) | Wayland не умеет скрывать и возвращать окно, поэтому на KDE Wayland трей без этого бесполезен. Откат на чистый Wayland: `YAMUSIC_NO_X11=1` |
 | Перерисовка содержимого после возврата из трея | окно не остаётся чёрным или полупустым после сворачивания и возврата |
 | Защита от «моргания» при сворачивании | перерисовка не возвращает окно на экран в момент нажатия «свернуть»: откладывается на 1,5 с и перепроверяется через 140 мс |
@@ -196,7 +196,7 @@ done
 ```bash
 kpackagetool6 --type Plasma/Applet --install extras/kde-widget     # установить
 kpackagetool6 --type Plasma/Applet --upgrade extras/kde-widget     # обновить
-kpackagetool6 --type Plasma/Applet --remove org.rask.yamusicrs     # удалить
+kpackagetool6 --type Plasma/Applet --remove org.lionforest.yamusicrs     # удалить
 ```
 
 Нужен KDE Plasma 6.0 или новее. После установки: правый клик по панели → «Добавить элементы…» →

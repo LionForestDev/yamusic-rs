@@ -8,7 +8,7 @@
     "Category": "Multimedia",
     "Description": "Показывает исполнителя и трек из плеера «Яндекс Музыка RS» и управляет воспроизведением",
     "Icon": "media-playback-start",
-    "Id": "org.rask.yamusicrs",
+    "Id": "org.lionforest.yamusicrs",
     "License": "GPL-3.0-or-later",
     "Name": "Яндекс Музыка RS",
     "Version": "1.0.1"

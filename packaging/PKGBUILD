@@ -46,6 +46,6 @@ package() {
   done
 
   # Виджет для панели KDE Plasma 6 (см. extras/kde-widget/README.md).
-  install -d "$pkgdir/usr/share/plasma/plasmoids/org.rask.yamusicrs"
-  cp -r extras/kde-widget/. "$pkgdir/usr/share/plasma/plasmoids/org.rask.yamusicrs/"
+  install -d "$pkgdir/usr/share/plasma/plasmoids/org.lionforest.yamusicrs"
+  cp -r extras/kde-widget/. "$pkgdir/usr/share/plasma/plasmoids/org.lionforest.yamusicrs/"
 }
