@@ -40,6 +40,8 @@ struct State {
     playlists: Vec<Playlist>,
     albums: Vec<Album>,
     coll_shown: Option<Arc<Data>>,
+    /// Номер изменения лайков, который уже учтён: по нему перечитываются списки.
+    likes_rev: u64,
     pl_tab: usize,
     album_tab: usize,
     list_key: Option<String>,
@@ -592,6 +594,7 @@ impl Ctx {
     }
 
     fn refresh(self: &Rc<Self>) {
+        self.sync_likes();
         let said = self.st.borrow().net.as_ref().and_then(|n| n.toast.lock().unwrap().take());
         if let Some((msg, _)) = said {
             self.toast(msg);
@@ -611,6 +614,28 @@ impl Ctx {
         }
         if self.ui().global::<App>().get_menu_open() {
             self.load_menu_playlists();
+        }
+    }
+
+    /// Лайк или дизлайк сохранён на сервере — перечитываем «Мне нравится» и коллекцию.
+    /// Без этого добавленный трек появлялся в коллекции только после перезапуска.
+    fn sync_likes(self: &Rc<Self>) {
+        let rev = self.player.likes_rev();
+        if self.st.borrow().likes_rev == rev {
+            return;
+        }
+        let net = self.st.borrow().net.clone();
+        let Some(net) = net else {
+            self.st.borrow_mut().likes_rev = rev;
+            return;
+        };
+        // Ключ мог как раз грузиться — тогда повторим на следующем круге, номер пока не запоминаем.
+        let mut done = true;
+        for key in ["likes", "collection"] {
+            done &= net.refresh(key);
+        }
+        if done {
+            self.st.borrow_mut().likes_rev = rev;
         }
     }
 
@@ -1932,6 +1957,7 @@ pub fn run(start_hidden: bool) -> Result<(), slint::PlatformError> {
             playlists: Vec::new(),
             albums: Vec::new(),
             coll_shown: None,
+            likes_rev: 0,
             pl_tab: 0,
             album_tab: 0,
             list_key: None,

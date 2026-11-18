@@ -6332,7 +6332,7 @@ checksum = "ec7a2a501ed189703dba8b08142f057e887dfc4b2cc4db2d343ac6376ba3e0b9"
 
 [[package]]
 name = "yamusic-rs"
-version = "2.0.9"
+version = "2.0.10"
 dependencies = [
  "arboard",
  "base64 0.22.1",

@@ -7,6 +7,7 @@ use crate::eq::{Eq, EqParams};
 use rodio::{Decoder, OutputStream, Sink, Source as _};
 use std::collections::{HashSet, VecDeque};
 use std::io::Cursor;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::sync::{Arc, Mutex};
 use std::thread;
@@ -115,6 +116,8 @@ enum Msg {
     /// Первые байты трека уже пришли — можно начинать играть, остальное догружается.
     Stream { gen: u64, shared: Arc<crate::stream::Shared>, total: Option<u64> },
     Prefetch { id: String, res: Res<Vec<u8>> },
+    /// Лайк сохранён на сервере — пора перечитать «Мне нравится» и коллекцию.
+    LikesDone,
     Error(String),
 }
 
@@ -127,6 +130,8 @@ pub struct Player {
     tx: Sender<Msg>,
     shared: Arc<Mutex<Shared>>,
     likes: Likes,
+    /// Номер изменения лайков: коллекция и «Мне нравится» перезагружаются, когда он меняется.
+    likes_rev: Arc<AtomicU64>,
     pub eq: Arc<EqParams>,
 }
 
@@ -136,10 +141,17 @@ impl Player {
         let shared = Arc::new(Mutex::new(Shared { volume: 0.6, ..Default::default() }));
         let likes: Likes = Default::default();
         let eq: Arc<EqParams> = Default::default();
-        let p = Player { tx: tx.clone(), shared: shared.clone(), likes: likes.clone(), eq: eq.clone() };
+        let likes_rev: Arc<AtomicU64> = Default::default();
+        let p = Player {
+            tx: tx.clone(),
+            shared: shared.clone(),
+            likes: likes.clone(),
+            likes_rev: likes_rev.clone(),
+            eq: eq.clone(),
+        };
         thread::Builder::new()
             .name("audio".into())
-            .spawn(move || Engine::new(tx, shared, likes, notify, eq).run(rx))
+            .spawn(move || Engine::new(tx, shared, likes, likes_rev, notify, eq).run(rx))
             .expect("audio thread");
         p
     }
@@ -154,6 +166,11 @@ impl Player {
 
     pub fn is_liked(&self, id: &str) -> bool {
         self.likes.lock().unwrap().contains(id)
+    }
+
+    /// Сколько раз менялись лайки: экран сравнивает с прошлым значением и обновляет списки.
+    pub fn likes_rev(&self) -> u64 {
+        self.likes_rev.load(Ordering::Acquire)
     }
 
 }
@@ -199,6 +216,7 @@ struct Engine {
     bg: Sender<Job>,
     shared: Arc<Mutex<Shared>>,
     likes: Likes,
+    likes_rev: Arc<AtomicU64>,
     notify: Notify,
     eq: Arc<EqParams>,
     audio: Option<(OutputStream, Sink)>,
@@ -236,7 +254,7 @@ struct Engine {
 }
 
 impl Engine {
-    fn new(tx: Sender<Msg>, shared: Arc<Mutex<Shared>>, likes: Likes, notify: Notify, eq: Arc<EqParams>) -> Self {
+    fn new(tx: Sender<Msg>, shared: Arc<Mutex<Shared>>, likes: Likes, likes_rev: Arc<AtomicU64>, notify: Notify, eq: Arc<EqParams>) -> Self {
         // Фидбек и лайки — по порядку в отдельном потоке, чтобы не блокировать плеер.
         let (bg, bg_rx) = mpsc::channel::<Job>();
         thread::Builder::new()
@@ -252,6 +270,7 @@ impl Engine {
             bg,
             shared,
             likes,
+            likes_rev,
             notify,
             eq,
             audio: None,
@@ -558,6 +577,7 @@ impl Engine {
                     }
                 }
             }
+            Msg::LikesDone => {}
             Msg::Error(e) => self.error(e),
         }
     }
@@ -629,12 +649,18 @@ impl Engine {
             Cmd::LikeTrack(t) => self.toggle_like(t),
             Cmd::Dislike => {
                 if let (Some(api), Some(t)) = (self.api.clone(), self.current.as_ref()) {
-                    let id = t.full_id();
-                    let uid = self.uid.clone();
-                    let tx = self.tx.clone();
+                    let (id, track_id) = (t.full_id(), t.id.clone());
+                    let (uid, tx) = (self.uid.clone(), self.tx.clone());
+                    let (rev, likes) = (self.likes_rev.clone(), self.likes.clone());
                     let _ = self.bg.send(Box::new(move || {
-                        if let Err(e) = api.dislike(&uid, &id) {
-                            let _ = tx.send(Msg::Error(format!("Дизлайк не сохранился: {e}")));
+                        match api.dislike(&uid, &id) {
+                            Ok(()) => {
+                                // Дизлайк убирает трек из «Мне нравится» и на сервере — значит и здесь.
+                                likes.lock().unwrap().remove(&track_id);
+                                rev.fetch_add(1, Ordering::AcqRel);
+                                let _ = tx.send(Msg::LikesDone);
+                            }
+                            Err(e) => drop(tx.send(Msg::Error(format!("Дизлайк не сохранился: {e}")))),
                         }
                     }));
                 }
@@ -717,10 +743,15 @@ impl Engine {
             }
             had
         };
-        let (uid, id, tx) = (self.uid.clone(), t.full_id(), self.tx.clone());
+        let (uid, id, tx, rev) = (self.uid.clone(), t.full_id(), self.tx.clone(), self.likes_rev.clone());
         let _ = self.bg.send(Box::new(move || {
-            if let Err(e) = api.like(&uid, &id, remove) {
-                let _ = tx.send(Msg::Error(format!("Лайк не сохранился: {e}")));
+            match api.like(&uid, &id, remove) {
+                Ok(()) => {
+                    // Только после ответа сервера: иначе перечитаем список до того, как лайк сохранился.
+                    rev.fetch_add(1, Ordering::AcqRel);
+                    let _ = tx.send(Msg::LikesDone);
+                }
+                Err(e) => drop(tx.send(Msg::Error(format!("Лайк не сохранился: {e}")))),
             }
         }));
     }

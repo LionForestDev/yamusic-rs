@@ -190,15 +190,18 @@ impl Net {
         self.store.lock().unwrap().contains_key(key).then_some(())
     }
 
-    pub fn refresh(&self, key: &str) {
+    /// Перечитать ключ. false — данные как раз грузятся, вызов надо повторить позже;
+    /// true — перезагрузка начата или ключа в кэше нет (тогда он загрузится при открытии).
+    pub fn refresh(&self, key: &str) -> bool {
         let mut st = self.store.lock().unwrap();
         match st.get_mut(key) {
-            Some(s) if s.loading => return,
+            Some(s) if s.loading => return false,
             Some(s) => s.loading = true,
-            None => return,
+            None => return true,
         }
         drop(st);
         self.load(key);
+        true
     }
 
     fn load(&self, key: &str) {
